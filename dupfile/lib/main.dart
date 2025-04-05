@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
 import 'dart:io';
+import 'dart:convert';
 import 'package:file_picker/file_picker.dart';
 import 'package:crypto/crypto.dart';
 
@@ -33,7 +34,6 @@ class _HomeScreenState extends State<HomeScreen> {
   String? _checkDuplicatesDirectory; // Directory to check for duplicates
 
   bool _isProcessing = false;
-  bool _isCheckingDuplicates = false;
   int _filesProcessed = 0;
 
   final Map<String, List<String>> _fileChecksums = {}; // Stores all file hashes
@@ -41,8 +41,17 @@ class _HomeScreenState extends State<HomeScreen> {
 
   /// Computes SHA-256 checksum for a file
   Future<String> _calculateChecksum(File file) async {
-    List<int> fileBytes = await file.readAsBytes();
-    return sha256.convert(fileBytes).toString();
+    final input = file.openRead();
+    final digest = await sha256.bind(input).first;
+    return digest.toString();
+  }
+
+  /// Saves checksums to a JSON file in a structured, readable format
+  Future<void> _saveChecksumsToJson() async {
+    final file = File('checksums.json');
+    final encoder = JsonEncoder.withIndent('  ');
+    final jsonContent = encoder.convert(_fileChecksums);
+    await file.writeAsString(jsonContent);
   }
 
   /// Checks for duplicate files in a selected directory
@@ -54,18 +63,27 @@ class _HomeScreenState extends State<HomeScreen> {
       _duplicateFiles.clear();
     });
 
-    Directory dir = Directory(directoryPath);
+    final dir = Directory(directoryPath);
     try {
-      List<FileSystemEntity> entities = dir.listSync(recursive: true);
-      for (var entity in entities) {
+      await for (var entity in dir.list(recursive: true, followLinks: false)) {
         if (entity is File) {
-          String checksum = await _calculateChecksum(entity);
-          setState(() {
+          try {
+            String checksum = await _calculateChecksum(entity);
             _fileChecksums.putIfAbsent(checksum, () => []).add(entity.path);
             _filesProcessed++;
-          });
+
+            // To reduce memory usage, offload data periodically
+            if (_filesProcessed % 100 == 0) {
+              await _saveChecksumsToJson();
+            }
+          } catch (_) {
+            continue; // Skip unreadable files
+          }
         }
       }
+
+      // Save final snapshot
+      await _saveChecksumsToJson();
 
       // Identify duplicates
       _fileChecksums.forEach((checksum, paths) {
@@ -93,15 +111,30 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  Future<void> _openFileExplorer(String filePath) async {
+    final directory = File(filePath).parent.path;
+
+    if (Platform.isWindows) {
+      await Process.run('explorer', [directory]);
+    } else if (Platform.isMacOS) {
+      await Process.run('open', [directory]);
+    } else if (Platform.isLinux) {
+      await Process.run('xdg-open', [directory]);
+    } else {
+      print('Unsupported platform');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    int totalDuplicates = _duplicateFiles.values.fold(0, (sum, list) => sum + list.length);
+
     return Scaffold(
       appBar: AppBar(title: Text('Duplicate File Checker')),
       body: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            // Select directory to check for duplicate files
             ElevatedButton(
               onPressed: _isProcessing ? null : _selectCheckDuplicatesDirectory,
               child: Text('Select Directory to Find Duplicates'),
@@ -114,8 +147,6 @@ class _HomeScreenState extends State<HomeScreen> {
               textAlign: TextAlign.center,
             ),
             SizedBox(height: 20),
-
-            // Progress indicator for duplicate detection
             if (_isProcessing)
               Column(
                 children: [
@@ -128,8 +159,11 @@ class _HomeScreenState extends State<HomeScreen> {
                 ],
               ),
             SizedBox(height: 20),
-
-            // Display duplicate files
+            if (!_isProcessing && _duplicateFiles.isNotEmpty)
+              Text(
+                'Total Duplicates Found: $totalDuplicates',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.red),
+              ),
             Expanded(
               child: _duplicateFiles.isEmpty && !_isProcessing && _checkDuplicatesDirectory != null
                   ? Center(
@@ -150,7 +184,21 @@ class _HomeScreenState extends State<HomeScreen> {
                                 color: Colors.green,
                               ),
                             ),
-                            ...entry.value.map((filePath) => Text(' - $filePath')),
+                            ...entry.value.map(
+                              (filePath) => InkWell(
+                                onTap: () => _openFileExplorer(filePath),
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(vertical: 2.0),
+                                  child: Text(
+                                    ' - $filePath',
+                                    style: TextStyle(
+                                      color: Colors.blue,
+                                      decoration: TextDecoration.underline,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
                             SizedBox(height: 10),
                           ],
                         );
