@@ -9,129 +9,88 @@ void main() {
 }
 
 class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'Duplicate File Checker',
       theme: ThemeData(primarySwatch: Colors.blue),
-      home: SplashScreen(),
-    );
-  }
-}
-
-class SplashScreen extends StatefulWidget {
-  @override
-  _SplashScreenState createState() => _SplashScreenState();
-}
-
-class _SplashScreenState extends State<SplashScreen> {
-  @override
-  void initState() {
-    super.initState();
-    Timer(Duration(seconds: 3), () {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (context) => HomeScreen()),
-      );
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.blueAccent,
-      body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.folder, size: 100, color: Colors.white),
-            SizedBox(height: 20),
-            Text(
-              'Duplicate File Checker',
-              style: TextStyle(
-                fontSize: 24,
-                fontWeight: FontWeight.bold,
-                color: Colors.white,
-              ),
-            ),
-          ],
-        ),
-      ),
+      home: HomeScreen(),
     );
   }
 }
 
 class HomeScreen extends StatefulWidget {
+  const HomeScreen({super.key});
+
   @override
   _HomeScreenState createState() => _HomeScreenState();
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  Map<String, List<String>> _fileChecksums = {};
-  Map<String, List<String>> _duplicateFiles = {};
-  bool _isCheckingDuplicates = false;
-  bool _isCollectingChecksums = false;
-  int _filesProcessed = 0;
-  int _directoriesProcessed = 0;
+  String? _checkDuplicatesDirectory; // Directory to check for duplicates
 
-  Future<void> _selectDirectoryToCheckDuplicates() async {
-    String? directory = await FilePicker.platform.getDirectoryPath();
-    if (directory != null) {
-      await _processDirectory(directory);
-      _findDuplicateFiles();
-    }
+  bool _isProcessing = false;
+  bool _isCheckingDuplicates = false;
+  int _filesProcessed = 0;
+
+  final Map<String, List<String>> _fileChecksums = {}; // Stores all file hashes
+  final Map<String, List<String>> _duplicateFiles = {}; // Stores duplicates
+
+  /// Computes SHA-256 checksum for a file
+  Future<String> _calculateChecksum(File file) async {
+    List<int> fileBytes = await file.readAsBytes();
+    return sha256.convert(fileBytes).toString();
   }
 
-  Future<void> _processDirectory(String directoryPath) async {
+  /// Checks for duplicate files in a selected directory
+  Future<void> _findDuplicateFiles(String directoryPath) async {
     setState(() {
-      _isCollectingChecksums = true;
+      _isProcessing = true;
       _filesProcessed = 0;
-      _directoriesProcessed = 0;
+      _fileChecksums.clear();
+      _duplicateFiles.clear();
     });
 
     Directory dir = Directory(directoryPath);
     try {
-      await for (var entity in dir.list(recursive: true, followLinks: false)) {
+      List<FileSystemEntity> entities = dir.listSync(recursive: true);
+      for (var entity in entities) {
         if (entity is File) {
-          try {
-            String checksum = await _calculateChecksum(entity);
+          String checksum = await _calculateChecksum(entity);
+          setState(() {
             _fileChecksums.putIfAbsent(checksum, () => []).add(entity.path);
             _filesProcessed++;
-          } catch (e) {
-            print("Error reading file: \${entity.path}");
-          }
-        } else if (entity is Directory) {
-          _directoriesProcessed++;
+          });
         }
       }
-    } catch (e) {
-      print("Error processing directory: \$e");
-    }
 
-    setState(() {
-      _isCollectingChecksums = false;
-    });
-  }
-
-  Future<String> _calculateChecksum(File file) async {
-    try {
-      var input = await file.readAsBytes();
-      return sha256.convert(input).toString();
-    } catch (e) {
-      return "";
-    }
-  }
-
-  void _findDuplicateFiles() {
-    setState(() {
-      _duplicateFiles.clear();
+      // Identify duplicates
       _fileChecksums.forEach((checksum, paths) {
         if (paths.length > 1) {
           _duplicateFiles[checksum] = paths;
         }
       });
-    });
+    } catch (e) {
+      print("Error finding duplicates: $e");
+    } finally {
+      setState(() {
+        _isProcessing = false;
+      });
+    }
+  }
+
+  /// Selects a directory to check for duplicate files
+  Future<void> _selectCheckDuplicatesDirectory() async {
+    String? directory = await FilePicker.platform.getDirectoryPath();
+    if (directory != null) {
+      setState(() {
+        _checkDuplicatesDirectory = directory;
+      });
+      await _findDuplicateFiles(directory);
+    }
   }
 
   @override
@@ -142,43 +101,62 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
+            // Select directory to check for duplicate files
             ElevatedButton(
-              onPressed:
-                  _isCheckingDuplicates || _isCollectingChecksums
-                      ? null
-                      : _selectDirectoryToCheckDuplicates,
+              onPressed: _isProcessing ? null : _selectCheckDuplicatesDirectory,
               child: Text('Select Directory to Find Duplicates'),
             ),
+            SizedBox(height: 10),
+            Text(
+              _checkDuplicatesDirectory != null
+                  ? 'Checking in: $_checkDuplicatesDirectory'
+                  : 'No directory selected',
+              textAlign: TextAlign.center,
+            ),
             SizedBox(height: 20),
-            _isCollectingChecksums
-                ? Column(
-                  children: [
-                    CircularProgressIndicator(),
-                    SizedBox(height: 10),
-                    Text(
-                      "Processing... Files: \$_filesProcessed | Directories: \$_directoriesProcessed",
-                      style: TextStyle(color: Colors.blue),
-                    ),
-                  ],
-                )
-                : _duplicateFiles.isEmpty
-                ? Text(
-                  "No duplicates found.",
-                  style: TextStyle(color: Colors.green),
-                )
-                : Expanded(
-                  child: ListView(
-                    children:
-                        _duplicateFiles.entries.expand((entry) {
-                          return entry.value.map(
-                            (path) => ListTile(
-                              title: Text(path),
-                              subtitle: Text('Checksum: ${entry.key}'),
-                            ),
-                          );
-                        }).toList(),
+
+            // Progress indicator for duplicate detection
+            if (_isProcessing)
+              Column(
+                children: [
+                  CircularProgressIndicator(),
+                  SizedBox(height: 10),
+                  Text(
+                    'Processing... (Files processed: $_filesProcessed)',
+                    style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blue),
                   ),
-                ),
+                ],
+              ),
+            SizedBox(height: 20),
+
+            // Display duplicate files
+            Expanded(
+              child: _duplicateFiles.isEmpty && !_isProcessing && _checkDuplicatesDirectory != null
+                  ? Center(
+                      child: Text(
+                        'No duplicate files found in the selected directory.',
+                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.green),
+                      ),
+                    )
+                  : ListView(
+                      children: _duplicateFiles.entries.map((entry) {
+                        return Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Checksum: ${entry.key}',
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                color: Colors.green,
+                              ),
+                            ),
+                            ...entry.value.map((filePath) => Text(' - $filePath')),
+                            SizedBox(height: 10),
+                          ],
+                        );
+                      }).toList(),
+                    ),
+            ),
           ],
         ),
       ),
