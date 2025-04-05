@@ -73,6 +73,7 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _shouldStop = false;
   int _filesProcessed = 0;
   final List<String> _directoriesBeingScanned = [];
+  String? _currentFile;
 
   final Map<String, List<String>> _fileChecksums = {};
   final Map<String, List<String>> _duplicateFiles = {};
@@ -102,14 +103,18 @@ class _HomeScreenState extends State<HomeScreen> {
 
     final dir = Directory(directoryPath);
     int localFileCount = 0;
+
     try {
-      await for (var entity in dir.list(recursive: true, followLinks: false)) {
+      final List<FileSystemEntity> entities = dir.listSync(recursive: true, followLinks: false);
+
+      for (var entity in entities) {
         if (_shouldStop) break;
 
         if (entity is File) {
           try {
             String parentDir = entity.parent.path;
             setState(() {
+              _currentFile = entity.path;
               _directoriesBeingScanned.insert(0, parentDir);
               if (_directoriesBeingScanned.length > 5) {
                 _directoriesBeingScanned.removeLast();
@@ -150,6 +155,7 @@ class _HomeScreenState extends State<HomeScreen> {
     } finally {
       setState(() {
         _isProcessing = false;
+        _currentFile = null;
       });
     }
   }
@@ -215,6 +221,13 @@ class _HomeScreenState extends State<HomeScreen> {
                     'Processing... (Files processed: $_filesProcessed)',
                     style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blue),
                   ),
+                  if (_currentFile != null) ...[
+                    SizedBox(height: 10),
+                    Text(
+                      'Current file: $_currentFile',
+                      style: TextStyle(color: Colors.black87, fontSize: 12),
+                    ),
+                  ],
                   SizedBox(height: 10),
                   ElevatedButton(
                     onPressed: _stopProcessing,
