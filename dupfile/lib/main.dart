@@ -18,7 +18,44 @@ class MyApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       title: 'Duplicate File Checker',
       theme: ThemeData(primarySwatch: Colors.blue),
-      home: HomeScreen(),
+      home: SplashScreen(),
+    );
+  }
+}
+
+class SplashScreen extends StatefulWidget {
+  @override
+  _SplashScreenState createState() => _SplashScreenState();
+}
+
+class _SplashScreenState extends State<SplashScreen> {
+  @override
+  void initState() {
+    super.initState();
+    Timer(Duration(seconds: 3), () {
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(builder: (_) => HomeScreen()),
+      );
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.white,
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.find_in_page, size: 80, color: Colors.blue),
+            SizedBox(height: 20),
+            Text(
+              'Duplicate File Checker',
+              style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.blue),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -31,22 +68,21 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  String? _checkDuplicatesDirectory; // Directory to check for duplicates
-
+  String? _checkDuplicatesDirectory;
   bool _isProcessing = false;
+  bool _shouldStop = false;
   int _filesProcessed = 0;
+  final List<String> _directoriesBeingScanned = [];
 
-  final Map<String, List<String>> _fileChecksums = {}; // Stores all file hashes
-  final Map<String, List<String>> _duplicateFiles = {}; // Stores duplicates
+  final Map<String, List<String>> _fileChecksums = {};
+  final Map<String, List<String>> _duplicateFiles = {};
 
-  /// Computes SHA-256 checksum for a file
   Future<String> _calculateChecksum(File file) async {
     final input = file.openRead();
     final digest = await sha256.bind(input).first;
     return digest.toString();
   }
 
-  /// Saves checksums to a JSON file in a structured, readable format
   Future<void> _saveChecksumsToJson() async {
     final file = File('checksums.json');
     final encoder = JsonEncoder.withIndent('  ');
@@ -54,38 +90,56 @@ class _HomeScreenState extends State<HomeScreen> {
     await file.writeAsString(jsonContent);
   }
 
-  /// Checks for duplicate files in a selected directory
   Future<void> _findDuplicateFiles(String directoryPath) async {
     setState(() {
       _isProcessing = true;
+      _shouldStop = false;
       _filesProcessed = 0;
       _fileChecksums.clear();
       _duplicateFiles.clear();
+      _directoriesBeingScanned.clear();
     });
 
     final dir = Directory(directoryPath);
+    int localFileCount = 0;
     try {
       await for (var entity in dir.list(recursive: true, followLinks: false)) {
+        if (_shouldStop) break;
+
         if (entity is File) {
           try {
+            String parentDir = entity.parent.path;
+            setState(() {
+              _directoriesBeingScanned.insert(0, parentDir);
+              if (_directoriesBeingScanned.length > 5) {
+                _directoriesBeingScanned.removeLast();
+              }
+            });
+
             String checksum = await _calculateChecksum(entity);
             _fileChecksums.putIfAbsent(checksum, () => []).add(entity.path);
-            _filesProcessed++;
+            localFileCount++;
 
-            // To reduce memory usage, offload data periodically
-            if (_filesProcessed % 100 == 0) {
+            if (localFileCount % 10 == 0) {
+              setState(() {
+                _filesProcessed = localFileCount;
+              });
+            }
+
+            if (localFileCount % 100 == 0) {
               await _saveChecksumsToJson();
             }
           } catch (_) {
-            continue; // Skip unreadable files
+            continue;
           }
         }
       }
 
-      // Save final snapshot
       await _saveChecksumsToJson();
+      setState(() {
+        _filesProcessed = localFileCount;
+      });
 
-      // Identify duplicates
       _fileChecksums.forEach((checksum, paths) {
         if (paths.length > 1) {
           _duplicateFiles[checksum] = paths;
@@ -100,7 +154,6 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  /// Selects a directory to check for duplicate files
   Future<void> _selectCheckDuplicatesDirectory() async {
     String? directory = await FilePicker.platform.getDirectoryPath();
     if (directory != null) {
@@ -123,6 +176,12 @@ class _HomeScreenState extends State<HomeScreen> {
     } else {
       print('Unsupported platform');
     }
+  }
+
+  void _stopProcessing() {
+    setState(() {
+      _shouldStop = true;
+    });
   }
 
   @override
@@ -155,6 +214,22 @@ class _HomeScreenState extends State<HomeScreen> {
                   Text(
                     'Processing... (Files processed: $_filesProcessed)',
                     style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blue),
+                  ),
+                  SizedBox(height: 10),
+                  ElevatedButton(
+                    onPressed: _stopProcessing,
+                    child: Text('Stop'),
+                  ),
+                  SizedBox(height: 10),
+                  Text(
+                    'Recently Scanned Directories:',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  Container(
+                    height: 100,
+                    child: ListView(
+                      children: _directoriesBeingScanned.map((dir) => Text(dir)).toList(),
+                    ),
                   ),
                 ],
               ),
