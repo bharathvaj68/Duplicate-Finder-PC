@@ -1,12 +1,17 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
 import 'dart:io';
-import 'dart:convert';
 import 'package:file_picker/file_picker.dart';
 import 'package:crypto/crypto.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+import 'package:path/path.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 void main() {
-  runApp(MyApp());
+  sqfliteFfiInit();
+  databaseFactory = databaseFactoryFfi;
+  runApp(const MyApp());
 }
 
 class MyApp extends StatelessWidget {
@@ -18,26 +23,40 @@ class MyApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       title: 'Duplicate File Checker',
       theme: ThemeData(primarySwatch: Colors.blue),
-      home: SplashScreen(),
+      home: const SplashScreenWrapper(),
     );
   }
 }
 
-class SplashScreen extends StatefulWidget {
+class SplashScreenWrapper extends StatefulWidget {
+  const SplashScreenWrapper({super.key});
+
   @override
-  _SplashScreenState createState() => _SplashScreenState();
+  State<SplashScreenWrapper> createState() => _SplashScreenWrapperState();
 }
 
-class _SplashScreenState extends State<SplashScreen> {
+class _SplashScreenWrapperState extends State<SplashScreenWrapper> {
+  bool _showHome = false;
+
   @override
   void initState() {
     super.initState();
-    Timer(Duration(seconds: 3), () {
-      Navigator.of(context).pushReplacement(
-        MaterialPageRoute(builder: (_) => HomeScreen()),
-      );
+    Timer(const Duration(seconds: 3), () {
+      if (!mounted) return;
+      setState(() {
+        _showHome = true;
+      });
     });
   }
+
+  @override
+  Widget build(BuildContext context) {
+    return _showHome ? const HomeScreen() : const SplashScreen();
+  }
+}
+
+class SplashScreen extends StatelessWidget {
+  const SplashScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -46,7 +65,7 @@ class _SplashScreenState extends State<SplashScreen> {
       body: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
-          children: [
+          children: const [
             Icon(Icons.find_in_page, size: 80, color: Colors.blue),
             SizedBox(height: 20),
             Text(
@@ -60,239 +79,189 @@ class _SplashScreenState extends State<SplashScreen> {
   }
 }
 
+class DBHelper {
+  static Database? _db;
+
+  static Future<Database> get database async {
+    if (_db != null) return _db!;
+    _db = await _initDB('checksums.db');
+    return _db!;
+  }
+
+  static Future<Database> _initDB(String fileName) async {
+    final documentsDirectory = await getApplicationDocumentsDirectory();
+    final path = join(documentsDirectory.path, fileName);
+    return await databaseFactory.openDatabase(
+      path,
+      options: OpenDatabaseOptions(
+        version: 1,
+        onCreate: (db, version) async {
+          await db.execute('''
+            CREATE TABLE checksums (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              checksum TEXT,
+              filePath TEXT
+            )
+          ''');
+        },
+      ),
+    );
+  }
+
+  static Future<void> insertChecksumIfNotExists(String checksum, String filePath) async {
+    final db = await database;
+    final existing = await db.query('checksums', where: 'checksum = ? AND filePath = ?', whereArgs: [checksum, filePath]);
+    if (existing.isEmpty) {
+      await db.insert('checksums', {
+        'checksum': checksum,
+        'filePath': filePath,
+      });
+    }
+  }
+
+  static Future<List<Map<String, dynamic>>> getDuplicates() async {
+    final db = await database;
+    return await db.rawQuery('''
+      SELECT checksum, GROUP_CONCAT(filePath, "||") as files, COUNT(*) as count 
+      FROM checksums 
+      GROUP BY checksum 
+      HAVING count > 1
+    ''');
+  }
+
+  static Future<void> clearDatabase() async {
+    final db = await database;
+    await db.delete('checksums');
+  }
+}
+
+Future<void> openDirectoryInExplorer(String filePath) async {
+  final directoryPath = File(filePath).parent.path;
+  if (await Directory(directoryPath).exists()) {
+    final uri = Uri.file(directoryPath);
+    await launchUrl(uri);
+  }
+}
+
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
   @override
-  _HomeScreenState createState() => _HomeScreenState();
+  State<HomeScreen> createState() => _HomeScreenState();
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  String? _checkDuplicatesDirectory;
-  bool _isProcessing = false;
-  bool _shouldStop = false;
-  int _filesProcessed = 0;
-  final List<String> _directoriesBeingScanned = [];
-  String? _currentFile;
+  List<Map<String, dynamic>> _duplicateFiles = [];
+  bool _isScanning = false;
+  int _processed = 0;
+  int _total = 0;
+  String _currentFile = '';
 
-  final Map<String, List<String>> _fileChecksums = {};
-  final Map<String, List<String>> _duplicateFiles = {};
+  Future<void> _scanForDuplicates() async {
+    String? directoryPath = await FilePicker.platform.getDirectoryPath();
+    if (directoryPath == null) return;
 
-  Future<String> _calculateChecksum(File file) async {
-    final input = file.openRead();
-    final digest = await sha256.bind(input).first;
-    return digest.toString();
-  }
-
-  Future<void> _saveChecksumsToJson() async {
-    final file = File('checksums.json');
-    final encoder = JsonEncoder.withIndent('  ');
-    final jsonContent = encoder.convert(_fileChecksums);
-    await file.writeAsString(jsonContent);
-  }
-
-  Future<void> _findDuplicateFiles(String directoryPath) async {
     setState(() {
-      _isProcessing = true;
-      _shouldStop = false;
-      _filesProcessed = 0;
-      _fileChecksums.clear();
-      _duplicateFiles.clear();
-      _directoriesBeingScanned.clear();
+      _isScanning = true;
+      _duplicateFiles = [];
+      _processed = 0;
+      _total = 0;
+      _currentFile = '';
     });
 
-    final dir = Directory(directoryPath);
-    int localFileCount = 0;
+    await DBHelper.clearDatabase();
+    final dirQueue = <Directory>[Directory(directoryPath)];
+    final allFiles = <File>[];
 
-    try {
-      final List<FileSystemEntity> entities = dir.listSync(recursive: true, followLinks: false);
-
-      for (var entity in entities) {
-        if (_shouldStop) break;
-
-        if (entity is File) {
-          try {
-            String parentDir = entity.parent.path;
-            setState(() {
-              _currentFile = entity.path;
-              _directoriesBeingScanned.insert(0, parentDir);
-              if (_directoriesBeingScanned.length > 5) {
-                _directoriesBeingScanned.removeLast();
-              }
-            });
-
-            String checksum = await _calculateChecksum(entity);
-            _fileChecksums.putIfAbsent(checksum, () => []).add(entity.path);
-            localFileCount++;
-
-            if (localFileCount % 10 == 0) {
-              setState(() {
-                _filesProcessed = localFileCount;
-              });
-            }
-
-            if (localFileCount % 100 == 0) {
-              await _saveChecksumsToJson();
-            }
-          } catch (_) {
-            continue;
+    while (dirQueue.isNotEmpty) {
+      final currentDir = dirQueue.removeLast();
+      try {
+        final entities = currentDir.listSync(followLinks: false);
+        for (final entity in entities) {
+          if (entity is File) {
+            allFiles.add(entity);
+          } else if (entity is Directory) {
+            dirQueue.add(entity);
           }
         }
+      } catch (_) {
+        // Skip inaccessible directory
       }
-
-      await _saveChecksumsToJson();
-      setState(() {
-        _filesProcessed = localFileCount;
-      });
-
-      _fileChecksums.forEach((checksum, paths) {
-        if (paths.length > 1) {
-          _duplicateFiles[checksum] = paths;
-        }
-      });
-    } catch (e) {
-      print("Error finding duplicates: $e");
-    } finally {
-      setState(() {
-        _isProcessing = false;
-        _currentFile = null;
-      });
     }
-  }
 
-  Future<void> _selectCheckDuplicatesDirectory() async {
-    String? directory = await FilePicker.platform.getDirectoryPath();
-    if (directory != null) {
-      setState(() {
-        _checkDuplicatesDirectory = directory;
-      });
-      await _findDuplicateFiles(directory);
+    _total = allFiles.length;
+    for (final file in allFiles) {
+      try {
+        setState(() {
+          _currentFile = file.path;
+          _processed++;
+        });
+        final digest = await sha256.bind(file.openRead()).first;
+        await DBHelper.insertChecksumIfNotExists(digest.toString(), file.path);
+      } catch (_) {
+        // Skip unreadable file
+      }
     }
-  }
 
-  Future<void> _openFileExplorer(String filePath) async {
-    final directory = File(filePath).parent.path;
-
-    if (Platform.isWindows) {
-      await Process.run('explorer', [directory]);
-    } else if (Platform.isMacOS) {
-      await Process.run('open', [directory]);
-    } else if (Platform.isLinux) {
-      await Process.run('xdg-open', [directory]);
-    } else {
-      print('Unsupported platform');
-    }
-  }
-
-  void _stopProcessing() {
+    final duplicates = await DBHelper.getDuplicates();
     setState(() {
-      _shouldStop = true;
+      _isScanning = false;
+      _duplicateFiles = duplicates;
+      _currentFile = '';
     });
   }
 
   @override
   Widget build(BuildContext context) {
-    int totalDuplicates = _duplicateFiles.values.fold(0, (sum, list) => sum + list.length);
-
     return Scaffold(
-      appBar: AppBar(title: Text('Duplicate File Checker')),
-      body: Center(
+      appBar: AppBar(title: const Text('Duplicate File Checker')),
+      body: Padding(
+        padding: const EdgeInsets.all(16.0),
         child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
           children: [
             ElevatedButton(
-              onPressed: _isProcessing ? null : _selectCheckDuplicatesDirectory,
-              child: Text('Select Directory to Find Duplicates'),
+              onPressed: _isScanning ? null : _scanForDuplicates,
+              child: const Text('Scan for Duplicates'),
             ),
-            SizedBox(height: 10),
-            Text(
-              _checkDuplicatesDirectory != null
-                  ? 'Checking in: $_checkDuplicatesDirectory'
-                  : 'No directory selected',
-              textAlign: TextAlign.center,
-            ),
-            SizedBox(height: 20),
-            if (_isProcessing)
-              Column(
-                children: [
-                  CircularProgressIndicator(),
-                  SizedBox(height: 10),
-                  Text(
-                    'Processing... (Files processed: $_filesProcessed)',
-                    style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blue),
-                  ),
-                  if (_currentFile != null) ...[
-                    SizedBox(height: 10),
-                    Text(
-                      'Current file: $_currentFile',
-                      style: TextStyle(color: Colors.black87, fontSize: 12),
-                    ),
-                  ],
-                  SizedBox(height: 10),
-                  ElevatedButton(
-                    onPressed: _stopProcessing,
-                    child: Text('Stop'),
-                  ),
-                  SizedBox(height: 10),
-                  Text(
-                    'Recently Scanned Directories:',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  Container(
-                    height: 100,
-                    child: ListView(
-                      children: _directoriesBeingScanned.map((dir) => Text(dir)).toList(),
-                    ),
-                  ),
-                ],
-              ),
-            SizedBox(height: 20),
-            if (!_isProcessing && _duplicateFiles.isNotEmpty)
-              Text(
-                'Total Duplicates Found: $totalDuplicates',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.red),
-              ),
-            Expanded(
-              child: _duplicateFiles.isEmpty && !_isProcessing && _checkDuplicatesDirectory != null
-                  ? Center(
-                      child: Text(
-                        'No duplicate files found in the selected directory.',
-                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.green),
-                      ),
-                    )
-                  : ListView(
-                      children: _duplicateFiles.entries.map((entry) {
-                        return Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'Checksum: ${entry.key}',
-                              style: TextStyle(
-                                fontWeight: FontWeight.bold,
-                                color: Colors.green,
+            const SizedBox(height: 20),
+            if (_isScanning) ...[
+              const CircularProgressIndicator(),
+              const SizedBox(height: 10),
+              Text('Processing: $_processed / $_total'),
+              Text('Current file: $_currentFile'),
+            ] else ...[
+              Expanded(
+                child: ListView.builder(
+                  itemCount: _duplicateFiles.length,
+                  itemBuilder: (context, index) {
+                    final item = _duplicateFiles[index];
+                    final files = (item['files'] as String).split('||');
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Checksum: ${item['checksum']}',
+                          style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green),
+                        ),
+                        ...files.map(
+                          (filePath) => GestureDetector(
+                            onTap: () => openDirectoryInExplorer(filePath),
+                            child: Text(
+                              filePath,
+                              style: const TextStyle(
+                                color: Colors.blue,
+                                decoration: TextDecoration.underline,
                               ),
                             ),
-                            ...entry.value.map(
-                              (filePath) => InkWell(
-                                onTap: () => _openFileExplorer(filePath),
-                                child: Padding(
-                                  padding: const EdgeInsets.symmetric(vertical: 2.0),
-                                  child: Text(
-                                    ' - $filePath',
-                                    style: TextStyle(
-                                      color: Colors.blue,
-                                      decoration: TextDecoration.underline,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                            SizedBox(height: 10),
-                          ],
-                        );
-                      }).toList(),
-                    ),
-            ),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                      ],
+                    );
+                  },
+                ),
+              ),
+            ]
           ],
         ),
       ),

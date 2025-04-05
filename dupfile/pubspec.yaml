@@ -11,6 +11,12 @@ dependencies:
     sdk: flutter
   file_picker: ^6.1.1
   crypto: ^3.0.3
+  sqflite_common_ffi: ^2.3.1
+  path_provider: ^2.1.2
+  path: ^1.9.0
+  url_launcher: ^6.2.5
+
+
 
 dev_dependencies:
   flutter_test:
