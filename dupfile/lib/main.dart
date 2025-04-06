@@ -8,7 +8,6 @@ import 'package:path/path.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-
 void main() {
   sqfliteFfiInit();
   databaseFactory = databaseFactoryFfi;
@@ -23,7 +22,36 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'Duplicate File Checker',
-      theme: ThemeData(primarySwatch: Colors.blue),
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF4A6BFF),
+          brightness: Brightness.light,
+        ),
+        useMaterial3: true,
+        appBarTheme: const AppBarTheme(
+          elevation: 0,
+          centerTitle: true,
+          titleTextStyle: TextStyle(
+            fontSize: 22,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        cardTheme: CardTheme(
+          elevation: 2,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+          margin: const EdgeInsets.symmetric(vertical: 8),
+        ),
+      ),
+      darkTheme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF4A6BFF),
+          brightness: Brightness.dark,
+        ),
+        useMaterial3: true,
+      ),
+      themeMode: ThemeMode.system,
       home: const SplashScreenWrapper(),
     );
   }
@@ -36,23 +64,45 @@ class SplashScreenWrapper extends StatefulWidget {
   State<SplashScreenWrapper> createState() => _SplashScreenWrapperState();
 }
 
-class _SplashScreenWrapperState extends State<SplashScreenWrapper> {
+class _SplashScreenWrapperState extends State<SplashScreenWrapper> 
+    with SingleTickerProviderStateMixin {
   bool _showHome = false;
+  late AnimationController _controller;
+  late Animation<double> _animation;
 
   @override
   void initState() {
     super.initState();
-    Timer(const Duration(seconds: 3), () {
+    _controller = AnimationController(
+      duration: const Duration(milliseconds: 1200),
+      vsync: this,
+    );
+    _animation = CurvedAnimation(
+      parent: _controller,
+      curve: Curves.easeInOut,
+    );
+    _controller.forward();
+    
+    Timer(const Duration(seconds: 2), () {
       if (!mounted) return;
-      setState(() {
-        _showHome = true;
-      });
+      setState(() => _showHome = true);
     });
   }
 
   @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return _showHome ? const HomeScreen() : const SplashScreen();
+    return _showHome 
+        ? const HomeScreen() 
+        : FadeTransition(
+            opacity: _animation,
+            child: const SplashScreen(),
+          );
   }
 }
 
@@ -62,16 +112,39 @@ class SplashScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.white,
+      backgroundColor: Theme.of(context).colorScheme.background,
       body: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
-          children: const [
-            Icon(Icons.find_in_page, size: 80, color: Colors.blue),
-            SizedBox(height: 20),
+          children: [
+            Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.primary.withOpacity(0.1),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                Icons.find_in_page,
+                size: 60,
+                color: Theme.of(context).colorScheme.primary,
+              ),
+            ),
+            const SizedBox(height: 24),
             Text(
               'Duplicate File Checker',
-              style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.blue),
+              style: TextStyle(
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
+                color: Theme.of(context).colorScheme.onBackground,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Find and manage duplicate files',
+              style: TextStyle(
+                fontSize: 14,
+                color: Theme.of(context).colorScheme.onBackground.withOpacity(0.7),
+              ),
             ),
           ],
         ),
@@ -140,7 +213,9 @@ Future<void> openDirectoryInExplorer(String filePath) async {
   final directoryPath = File(filePath).parent.path;
   if (await Directory(directoryPath).exists()) {
     final uri = Uri.file(directoryPath);
-    await launchUrl(uri);
+    if (await canLaunchUrl(uri)) {
+      await launchUrl(uri);
+    }
   }
 }
 
@@ -158,6 +233,7 @@ class _HomeScreenState extends State<HomeScreen> {
   int _total = 0;
   String _currentFile = '';
   int _duplicateCount = 0;
+  double _progress = 0;
 
   Future<void> _scanForDuplicates() async {
     String? directoryPath = await FilePicker.platform.getDirectoryPath();
@@ -170,6 +246,7 @@ class _HomeScreenState extends State<HomeScreen> {
       _total = 0;
       _currentFile = '';
       _duplicateCount = 0;
+      _progress = 0;
     });
 
     await DBHelper.clearDatabase();
@@ -194,14 +271,15 @@ class _HomeScreenState extends State<HomeScreen> {
     for (final file in allFiles) {
       try {
         setState(() {
-          _currentFile = file.path;
+          _currentFile = file.path.split('/').last;
           _processed++;
+          _progress = _processed / _total;
         });
         final digest = await sha256.bind(file.openRead()).first;
         await DBHelper.insertChecksumIfNotExists(digest.toString(), file.path);
         final duplicates = await DBHelper.getDuplicates();
         setState(() {
-          _duplicateCount = duplicates.fold(0, (acc, item) => acc + (item['count'] as int));
+          _duplicateCount = duplicates.fold(0, (acc, item) => acc + (item['count'] as int) - 1);
         });
       } catch (_) {}
     }
@@ -217,57 +295,175 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Duplicate File Checker')),
+      appBar: AppBar(
+        title: const Text('Duplicate File Checker'),
+        actions: [
+          if (_duplicateCount > 0)
+            Padding(
+              padding: const EdgeInsets.only(right: 16),
+              child: Center(
+                child: Text(
+                  '$_duplicateCount duplicates',
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.onPrimaryContainer,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
       body: Padding(
         padding: const EdgeInsets.all(16.0),
         child: Column(
           children: [
-            ElevatedButton(
+            ElevatedButton.icon(
               onPressed: _isScanning ? null : _scanForDuplicates,
-              child: const Text('Scan for Duplicates'),
+              icon: const Icon(Icons.search),
+              label: const Text('Scan for Duplicates'),
+              style: ElevatedButton.styleFrom(
+                minimumSize: const Size.fromHeight(50),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
             ),
             const SizedBox(height: 20),
             if (_isScanning) ...[
-              const CircularProgressIndicator(),
-              const SizedBox(height: 10),
-              Text('Processing: $_processed / $_total'),
-              Text('Current file: $_currentFile'),
-              Text('Duplicate files found so far: $_duplicateCount'),
-            ] else ...[
-              Text('Total duplicate files: $_duplicateCount'),
-              const SizedBox(height: 10),
-              Expanded(
-                child: ListView.builder(
-                  itemCount: _duplicateFiles.length,
-                  itemBuilder: (context, index) {
-                    final item = _duplicateFiles[index];
-                    final files = (item['files'] as String).split('||');
-                    return Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Checksum: ${item['checksum']}',
-                          style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green),
-                        ),
-                        ...files.map(
-                          (filePath) => GestureDetector(
-                            onTap: () => openDirectoryInExplorer(filePath),
-                            child: Text(
-                              filePath,
-                              style: const TextStyle(
-                                color: Colors.blue,
-                                decoration: TextDecoration.underline,
-                              ),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 10),
-                      ],
-                    );
-                  },
+              LinearProgressIndicator(
+                value: _progress,
+                backgroundColor: Theme.of(context).colorScheme.surfaceVariant,
+                color: Theme.of(context).colorScheme.primary,
+              ),
+              const SizedBox(height: 16),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    'Processing files...',
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.onBackground.withOpacity(0.8),
+                    ),
+                  ),
+                  Text(
+                    '$_processed/$_total',
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(
+                _currentFile,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.onBackground.withOpacity(0.6),
                 ),
               ),
-            ]
+              const SizedBox(height: 16),
+              Text(
+                'Found $_duplicateCount duplicate files',
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.primary,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ] else ...[
+              if (_duplicateFiles.isEmpty)
+                Expanded(
+                  child: Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          Icons.folder_open,
+                          size: 60,
+                          color: Theme.of(context).colorScheme.onBackground.withOpacity(0.3),
+                        ),
+                        const SizedBox(height: 16),
+                        Text(
+                          'No duplicates found',
+                          style: TextStyle(
+                            fontSize: 18,
+                            color: Theme.of(context).colorScheme.onBackground.withOpacity(0.6),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                )
+              else
+                Expanded(
+                  child: ListView.builder(
+                    itemCount: _duplicateFiles.length,
+                    itemBuilder: (context, index) {
+                      final item = _duplicateFiles[index];
+                      final files = (item['files'] as String).split('||');
+                      return Card(
+                        child: Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.all(8),
+                                    decoration: BoxDecoration(
+                                      color: Theme.of(context).colorScheme.primary.withOpacity(0.1),
+                                      shape: BoxShape.circle,
+                                    ),
+                                    child: Text(
+                                      '${item['count']}',
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.bold,
+                                        color: Theme.of(context).colorScheme.primary,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Text(
+                                      'Duplicate group ${index + 1}',
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 16,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 12),
+                              ...files.map(
+                                (filePath) => ListTile(
+                                  contentPadding: EdgeInsets.zero,
+                                  leading: const Icon(Icons.insert_drive_file),
+                                  title: Text(
+                                    filePath.split('/').last,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  subtitle: Text(
+                                    filePath,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: Theme.of(context).colorScheme.onBackground.withOpacity(0.6),
+                                    ),
+                                  ),
+                                  trailing: IconButton(
+                                    icon: const Icon(Icons.folder_open),
+                                    onPressed: () => openDirectoryInExplorer(filePath),
+                                  ),
+                                  onTap: () => openDirectoryInExplorer(filePath),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+            ],
           ],
         ),
       ),
