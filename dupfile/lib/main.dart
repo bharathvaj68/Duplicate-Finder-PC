@@ -156,6 +156,7 @@ class _HomeScreenState extends State<HomeScreen> {
   int _processed = 0;
   int _total = 0;
   String _currentFile = '';
+  int _duplicateCount = 0;
 
   Future<void> _scanForDuplicates() async {
     String? directoryPath = await FilePicker.platform.getDirectoryPath();
@@ -167,6 +168,7 @@ class _HomeScreenState extends State<HomeScreen> {
       _processed = 0;
       _total = 0;
       _currentFile = '';
+      _duplicateCount = 0;
     });
 
     await DBHelper.clearDatabase();
@@ -184,9 +186,7 @@ class _HomeScreenState extends State<HomeScreen> {
             dirQueue.add(entity);
           }
         }
-      } catch (_) {
-        // Skip inaccessible directory
-      }
+      } catch (_) {}
     }
 
     _total = allFiles.length;
@@ -198,9 +198,11 @@ class _HomeScreenState extends State<HomeScreen> {
         });
         final digest = await sha256.bind(file.openRead()).first;
         await DBHelper.insertChecksumIfNotExists(digest.toString(), file.path);
-      } catch (_) {
-        // Skip unreadable file
-      }
+        final duplicates = await DBHelper.getDuplicates();
+        setState(() {
+          _duplicateCount = duplicates.fold(0, (acc, item) => acc + (item['count'] as int));
+        });
+      } catch (_) {}
     }
 
     final duplicates = await DBHelper.getDuplicates();
@@ -229,7 +231,10 @@ class _HomeScreenState extends State<HomeScreen> {
               const SizedBox(height: 10),
               Text('Processing: $_processed / $_total'),
               Text('Current file: $_currentFile'),
+              Text('Duplicate files found so far: $_duplicateCount'),
             ] else ...[
+              Text('Total duplicate files: $_duplicateCount'),
+              const SizedBox(height: 10),
               Expanded(
                 child: ListView.builder(
                   itemCount: _duplicateFiles.length,
