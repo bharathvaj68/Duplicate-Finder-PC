@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' show log, pow;
 import 'package:file_picker/file_picker.dart';
 import 'package:crypto/crypto.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
@@ -36,22 +37,7 @@ class MyApp extends StatelessWidget {
             fontWeight: FontWeight.w600,
           ),
         ),
-        cardTheme: CardTheme(
-          elevation: 2,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
-          ),
-          margin: const EdgeInsets.symmetric(vertical: 8),
-        ),
       ),
-      darkTheme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF4A6BFF),
-          brightness: Brightness.dark,
-        ),
-        useMaterial3: true,
-      ),
-      themeMode: ThemeMode.system,
       home: const SplashScreenWrapper(),
     );
   }
@@ -64,29 +50,16 @@ class SplashScreenWrapper extends StatefulWidget {
   State<SplashScreenWrapper> createState() => _SplashScreenWrapperState();
 }
 
-class _SplashScreenWrapperState extends State<SplashScreenWrapper> 
-    with SingleTickerProviderStateMixin {
-  bool _showHome = false;
+class _SplashScreenWrapperState extends State<SplashScreenWrapper> with SingleTickerProviderStateMixin {
   late AnimationController _controller;
-  late Animation<double> _animation;
 
   @override
   void initState() {
     super.initState();
     _controller = AnimationController(
-      duration: const Duration(milliseconds: 1200),
+      duration: const Duration(milliseconds: 1500),
       vsync: this,
-    );
-    _animation = CurvedAnimation(
-      parent: _controller,
-      curve: Curves.easeInOut,
-    );
-    _controller.forward();
-    
-    Timer(const Duration(seconds: 2), () {
-      if (!mounted) return;
-      setState(() => _showHome = true);
-    });
+    )..forward();
   }
 
   @override
@@ -97,12 +70,17 @@ class _SplashScreenWrapperState extends State<SplashScreenWrapper>
 
   @override
   Widget build(BuildContext context) {
-    return _showHome 
-        ? const HomeScreen() 
-        : FadeTransition(
-            opacity: _animation,
-            child: const SplashScreen(),
-          );
+    return FutureBuilder(
+      future: Future.delayed(const Duration(seconds: 2)),
+      builder: (context, snapshot) {
+        return snapshot.connectionState == ConnectionState.done
+            ? const HomeScreen()
+            : FadeTransition(
+                opacity: _controller,
+                child: const SplashScreen(),
+              );
+      },
+    );
   }
 }
 
@@ -112,7 +90,7 @@ class SplashScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Theme.of(context).colorScheme.background,
+      backgroundColor: Theme.of(context).colorScheme.surface,
       body: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -135,15 +113,7 @@ class SplashScreen extends StatelessWidget {
               style: TextStyle(
                 fontSize: 24,
                 fontWeight: FontWeight.bold,
-                color: Theme.of(context).colorScheme.onBackground,
-              ),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'Find and manage duplicate files',
-              style: TextStyle(
-                fontSize: 14,
-                color: Theme.of(context).colorScheme.onBackground.withOpacity(0.7),
+                color: Theme.of(context).colorScheme.onSurface,
               ),
             ),
           ],
@@ -155,6 +125,7 @@ class SplashScreen extends StatelessWidget {
 
 class DBHelper {
   static Database? _db;
+  static const int _dbVersion = 2;
 
   static Future<Database> get database async {
     if (_db != null) return _db!;
@@ -168,54 +139,70 @@ class DBHelper {
     return await databaseFactory.openDatabase(
       path,
       options: OpenDatabaseOptions(
-        version: 1,
+        version: _dbVersion,
         onCreate: (db, version) async {
-          await db.execute('''
-            CREATE TABLE checksums (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              checksum TEXT,
-              filePath TEXT
-            )
-          ''');
+          await _createTables(db);
+        },
+        onUpgrade: (db, oldVersion, newVersion) async {
+          if (oldVersion < 2) {
+            await _migrateV1ToV2(db);
+          }
         },
       ),
     );
   }
 
-  static Future<void> insertChecksumIfNotExists(String checksum, String filePath) async {
-    final db = await database;
-    final existing = await db.query('checksums', where: 'checksum = ? AND filePath = ?', whereArgs: [checksum, filePath]);
-    if (existing.isEmpty) {
-      await db.insert('checksums', {
-        'checksum': checksum,
-        'filePath': filePath,
-      });
+  static Future<void> _createTables(Database db) async {
+    await db.execute('''CREATE TABLE checksums (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        checksum TEXT,
+        filePath TEXT,
+        fileName TEXT,
+        fileSize INTEGER,
+        lastModified INTEGER
+      )''');
+  }
+
+  static Future<void> _migrateV1ToV2(Database db) async {
+    try {
+      await db.execute('ALTER TABLE checksums ADD COLUMN fileName TEXT');
+      await db.execute('ALTER TABLE checksums ADD COLUMN fileSize INTEGER DEFAULT 0');
+      await db.execute('ALTER TABLE checksums ADD COLUMN lastModified INTEGER DEFAULT 0');
+    } catch (e) {
+      debugPrint('Migration error: $e');
+      await db.execute('DROP TABLE IF EXISTS checksums');
+      await _createTables(db);
     }
+  }
+
+  static Future<void> insertChecksum(String checksum, File file) async {
+    final db = await database;
+    await db.insert('checksums', {
+      'checksum': checksum,
+      'filePath': file.path,
+      'fileName': file.path.split(Platform.pathSeparator).last,
+      'fileSize': await file.length(),
+      'lastModified': (await file.lastModified()).millisecondsSinceEpoch,
+    });
   }
 
   static Future<List<Map<String, dynamic>>> getDuplicates() async {
     final db = await database;
-    return await db.rawQuery('''
-      SELECT checksum, GROUP_CONCAT(filePath, "||") as files, COUNT(*) as count 
-      FROM checksums 
-      GROUP BY checksum 
-      HAVING count > 1
-    ''');
+    return await db.rawQuery('''SELECT checksum, 
+                                        GROUP_CONCAT(filePath, "||") as files,
+                                        GROUP_CONCAT(fileName, "||") as fileNames,
+                                        GROUP_CONCAT(fileSize, "||") as fileSizes,
+                                        GROUP_CONCAT(lastModified, "||") as lastModifieds,
+                                        COUNT(*) as count
+                                FROM checksums
+                                GROUP BY checksum
+                                HAVING count > 1
+                                ORDER BY fileSize DESC''');
   }
 
   static Future<void> clearDatabase() async {
     final db = await database;
     await db.delete('checksums');
-  }
-}
-
-Future<void> openDirectoryInExplorer(String filePath) async {
-  final directoryPath = File(filePath).parent.path;
-  if (await Directory(directoryPath).exists()) {
-    final uri = Uri.file(directoryPath);
-    if (await canLaunchUrl(uri)) {
-      await launchUrl(uri);
-    }
   }
 }
 
@@ -226,7 +213,7 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   List<Map<String, dynamic>> _duplicateFiles = [];
   bool _isScanning = false;
   int _processed = 0;
@@ -234,10 +221,26 @@ class _HomeScreenState extends State<HomeScreen> {
   String _currentFile = '';
   int _duplicateCount = 0;
   double _progress = 0;
+  late AnimationController _scanController;
+
+  @override
+  void initState() {
+    super.initState();
+    _scanController = AnimationController(
+      duration: const Duration(milliseconds: 1000),
+      vsync: this,
+    );
+  }
+
+  @override
+  void dispose() {
+    _scanController.dispose();
+    super.dispose();
+  }
 
   Future<void> _scanForDuplicates() async {
-    String? directoryPath = await FilePicker.platform.getDirectoryPath();
-    if (directoryPath == null) return;
+    final directory = await FilePicker.platform.getDirectoryPath();
+    if (directory == null) return;
 
     setState(() {
       _isScanning = true;
@@ -250,46 +253,71 @@ class _HomeScreenState extends State<HomeScreen> {
     });
 
     await DBHelper.clearDatabase();
-    final dirQueue = <Directory>[Directory(directoryPath)];
-    final allFiles = <File>[];
+    final files = await _collectFiles(Directory(directory));
+    _total = files.length;
 
-    while (dirQueue.isNotEmpty) {
-      final currentDir = dirQueue.removeLast();
-      try {
-        final entities = currentDir.listSync(followLinks: false);
-        for (final entity in entities) {
-          if (entity is File) {
-            allFiles.add(entity);
-          } else if (entity is Directory) {
-            dirQueue.add(entity);
-          }
-        }
-      } catch (_) {}
-    }
+    for (final file in files) {
+      if (!mounted) return;
 
-    _total = allFiles.length;
-    for (final file in allFiles) {
+      setState(() {
+        _currentFile = file.path.split(Platform.pathSeparator).last;
+        _processed++;
+        _progress = _processed / _total;
+      });
+
       try {
-        setState(() {
-          _currentFile = file.path.split('/').last;
-          _processed++;
-          _progress = _processed / _total;
-        });
         final digest = await sha256.bind(file.openRead()).first;
-        await DBHelper.insertChecksumIfNotExists(digest.toString(), file.path);
+        await DBHelper.insertChecksum(digest.toString(), file);
         final duplicates = await DBHelper.getDuplicates();
         setState(() {
           _duplicateCount = duplicates.fold(0, (acc, item) => acc + (item['count'] as int) - 1);
         });
-      } catch (_) {}
+      } catch (e) {
+        debugPrint('Error processing file ${file.path}: $e');
+      }
     }
 
     final duplicates = await DBHelper.getDuplicates();
-    setState(() {
-      _isScanning = false;
-      _duplicateFiles = duplicates;
-      _currentFile = '';
-    });
+    if (mounted) {
+      setState(() {
+        _isScanning = false;
+        _duplicateFiles = duplicates;
+        _currentFile = '';
+      });
+      _scanController.forward();
+    }
+  }
+
+  Future<List<File>> _collectFiles(Directory dir) async {
+    final files = <File>[];
+    try {
+      await for (final entity in dir.list(recursive: true)) {
+        if (entity is File) {
+          files.add(entity);
+        }
+      }
+    } catch (e) {
+      debugPrint('Error listing directory: $e');
+    }
+    return files;
+  }
+
+  Future<void> _openFileLocation(String path) async {
+    final uri = Uri.file(File(path).parent.path);
+    if (await canLaunchUrl(uri)) {
+      await launchUrl(uri);
+    }
+  }
+
+  String _formatBytes(int bytes) {
+    if (bytes <= 0) return '0 B';
+    const suffixes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    final i = (log(bytes) / log(1024)).floor();
+    return '${(bytes / pow(1024, i)).toStringAsFixed(1)} ${suffixes[i]}';
+  }
+
+  String _formatDate(int timestamp) {
+    return DateTime.fromMillisecondsSinceEpoch(timestamp).toString().split(' ')[0];
   }
 
   @override
@@ -323,149 +351,97 @@ class _HomeScreenState extends State<HomeScreen> {
               label: const Text('Scan for Duplicates'),
               style: ElevatedButton.styleFrom(
                 minimumSize: const Size.fromHeight(50),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                ),
               ),
             ),
             const SizedBox(height: 20),
-            if (_isScanning) ...[
-              LinearProgressIndicator(
-                value: _progress,
-                backgroundColor: Theme.of(context).colorScheme.surfaceVariant,
-                color: Theme.of(context).colorScheme.primary,
-              ),
-              const SizedBox(height: 16),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    'Processing files...',
-                    style: TextStyle(
-                      color: Theme.of(context).colorScheme.onBackground.withOpacity(0.8),
-                    ),
-                  ),
-                  Text(
-                    '$_processed/$_total',
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Text(
-                _currentFile,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  color: Theme.of(context).colorScheme.onBackground.withOpacity(0.6),
-                ),
-              ),
-              const SizedBox(height: 16),
-              Text(
-                'Found $_duplicateCount duplicate files',
-                style: TextStyle(
-                  color: Theme.of(context).colorScheme.primary,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ] else ...[
-              if (_duplicateFiles.isEmpty)
-                Expanded(
-                  child: Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(
-                          Icons.folder_open,
-                          size: 60,
-                          color: Theme.of(context).colorScheme.onBackground.withOpacity(0.3),
-                        ),
-                        const SizedBox(height: 16),
-                        Text(
-                          'No duplicates found',
-                          style: TextStyle(
-                            fontSize: 18,
-                            color: Theme.of(context).colorScheme.onBackground.withOpacity(0.6),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                )
-              else
-                Expanded(
-                  child: ListView.builder(
-                    itemCount: _duplicateFiles.length,
-                    itemBuilder: (context, index) {
-                      final item = _duplicateFiles[index];
-                      final files = (item['files'] as String).split('||');
-                      return Card(
-                        child: Padding(
-                          padding: const EdgeInsets.all(16),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                children: [
-                                  Container(
-                                    padding: const EdgeInsets.all(8),
-                                    decoration: BoxDecoration(
-                                      color: Theme.of(context).colorScheme.primary.withOpacity(0.1),
-                                      shape: BoxShape.circle,
-                                    ),
-                                    child: Text(
-                                      '${item['count']}',
-                                      style: TextStyle(
-                                        fontWeight: FontWeight.bold,
-                                        color: Theme.of(context).colorScheme.primary,
-                                      ),
-                                    ),
-                                  ),
-                                  const SizedBox(width: 12),
-                                  Expanded(
-                                    child: Text(
-                                      'Duplicate group ${index + 1}',
-                                      style: const TextStyle(
-                                        fontWeight: FontWeight.bold,
-                                        fontSize: 16,
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 12),
-                              ...files.map(
-                                (filePath) => ListTile(
-                                  contentPadding: EdgeInsets.zero,
-                                  leading: const Icon(Icons.insert_drive_file),
-                                  title: Text(
-                                    filePath.split('/').last,
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                  subtitle: Text(
-                                    filePath,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                      fontSize: 12,
-                                      color: Theme.of(context).colorScheme.onBackground.withOpacity(0.6),
-                                    ),
-                                  ),
-                                  trailing: IconButton(
-                                    icon: const Icon(Icons.folder_open),
-                                    onPressed: () => openDirectoryInExplorer(filePath),
-                                  ),
-                                  onTap: () => openDirectoryInExplorer(filePath),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      );
-                    },
-                  ),
-                ),
-            ],
+            if (_isScanning) _buildScanProgress(context),
+            if (!_isScanning) _buildResults(context),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildScanProgress(BuildContext context) {
+    return Expanded(
+      child: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            CircularProgressIndicator(
+              value: _progress,
+              strokeWidth: 8,
+            ),
+            const SizedBox(height: 20),
+            Text(
+              'Scanning... $_processed/$_total',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 10),
+            Text(
+              _currentFile,
+              style: Theme.of(context).textTheme.bodySmall,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildResults(BuildContext context) {
+    if (_duplicateFiles.isEmpty) {
+      return Expanded(
+        child: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                Icons.folder_open,
+                size: 60,
+                color: Theme.of(context).disabledColor,
+              ),
+              const SizedBox(height: 16),
+              const Text('No duplicates found'),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Expanded(
+      child: ListView.builder(
+        itemCount: _duplicateFiles.length,
+        itemBuilder: (context, index) {
+          final group = _duplicateFiles[index];
+          final files = (group['files'] as String).split('||');
+          final names = (group['fileNames'] as String).split('||');
+          final sizes = (group['fileSizes'] as String).split('||').map(int.parse).toList();
+          final modified = (group['lastModifieds'] as String).split('||').map(int.parse).toList();
+
+          return Card(
+            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            color: Colors.red.shade50, // Highlight duplicates with red
+            child: ExpansionTile(
+              title: Text(
+                '${group['count']} duplicates (${_formatBytes(sizes.reduce((a, b) => a + b))})',
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+              children: List.generate(files.length, (i) => ListTile(
+                leading: const Icon(Icons.insert_drive_file),
+                title: Text(names[i]),
+                subtitle: Text(
+                  '${_formatBytes(sizes[i])} • ${_formatDate(modified[i])}',
+                ),
+                trailing: IconButton(
+                  icon: const Icon(Icons.folder_open),
+                  onPressed: () => _openFileLocation(files[i]),
+                ),
+                onTap: () => _openFileLocation(files[i]),
+              )),
+            ),
+          );
+        },
       ),
     );
   }
