@@ -762,7 +762,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
             child: Row(
               children: [
                 Icon(
-                  Icons.copy_all,
+                  Icons.file_copy_outlined,
                   size: 18,
                   color: Theme.of(context).colorScheme.onPrimaryContainer,
                 ),
