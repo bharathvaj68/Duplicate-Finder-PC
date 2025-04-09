@@ -268,7 +268,7 @@ class FileCheckerRepository {
 }
 
 // Bloc for state management
-enum ScanStatus { initial, scanning, completed, error }
+enum ScanStatus { initial, scanning, completed, cancelled, error }
 
 class ScanState {
   final ScanStatus status;
@@ -328,6 +328,9 @@ class ScanState {
 
 abstract class ScanEvent {}
 
+class CancelScanEvent extends ScanEvent {}
+
+
 class SelectDirectoryEvent extends ScanEvent {
   final bool useQuickScan;
   final List<String> extensions;
@@ -367,6 +370,7 @@ class UpdateExtensionsEvent extends ScanEvent {
 
 class ScanBloc extends Bloc<ScanEvent, ScanState> {
   final FileCheckerRepository repository;
+  bool _isCancelled = false;
 
   ScanBloc(this.repository) : super(ScanState()) {
     on<SelectDirectoryEvent>(_onSelectDirectory);
@@ -374,12 +378,21 @@ class ScanBloc extends Bloc<ScanEvent, ScanState> {
     on<CompleteScanEvent>(_onCompleteScan);
     on<ToggleQuickScanEvent>(_onToggleQuickScan);
     on<UpdateExtensionsEvent>(_onUpdateExtensions);
+    on<CancelScanEvent>(_onCancelScan);
   }
+
+  void _onCancelScan(CancelScanEvent event, Emitter<ScanState> emit) {
+  _isCancelled = true;
+  emit(state.copyWith(status: ScanStatus.initial)); // <-- back to idle
+}
 
   Future<void> _onSelectDirectory(
     SelectDirectoryEvent event,
     Emitter<ScanState> emit,
   ) async {
+
+    _isCancelled = false;
+
     final directory = await FilePicker.platform.getDirectoryPath();
     if (directory == null) return;
 
@@ -421,7 +434,7 @@ class ScanBloc extends Bloc<ScanEvent, ScanState> {
           final sameSize = entry.value;
 
           for (int i = 0; i < sameSize.length; i++) {
-            if (!isClosed) {
+            if (_isCancelled || isClosed) return; {
               final fileInfo = sameSize[i];
 
               emit(
@@ -451,14 +464,15 @@ class ScanBloc extends Bloc<ScanEvent, ScanState> {
           (count, group) => count + group.count - 1,
         );
 
-        add(CompleteScanEvent(duplicates));
+        if (!isClosed) add(CompleteScanEvent(duplicates));
+
       } else {
         // Standard full scan
         int processed = 0;
         int duplicateCount = 0;
 
         for (final file in files) {
-          if (isClosed) break;
+          if (_isCancelled || isClosed) return; 
 
           final fileInfo = FileInfo.fromFile(file);
 
@@ -783,15 +797,15 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
 
   Widget _buildScanButton(BuildContext context, ScanState state) {
     return ElevatedButton.icon(
-      onPressed:
-          state.status == ScanStatus.scanning
-              ? null
-              : () => context.read<ScanBloc>().add(
-                SelectDirectoryEvent(
-                  useQuickScan: state.useQuickScan,
-                  extensions: _selectedExtensions,
-                ),
-              ),
+      onPressed: (state.status == ScanStatus.scanning)
+    ? null
+    : () => context.read<ScanBloc>().add(
+          SelectDirectoryEvent(
+            useQuickScan: state.useQuickScan,
+            extensions: _selectedExtensions,
+          ),
+        ),
+
       icon: Icon(
         state.status == ScanStatus.scanning
             ? Icons.hourglass_top
@@ -942,58 +956,72 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   }
 
   Widget _buildScanProgress(BuildContext context, ScanState state) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(24.0),
-        child: Column(
-          children: [
-            LinearProgressIndicator(
-              value: state.progress,
-              minHeight: 10,
-              borderRadius: BorderRadius.circular(8),
+  return Card(
+    child: Padding(
+      padding: const EdgeInsets.all(24.0),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          LinearProgressIndicator(
+            value: state.progress,
+            minHeight: 10,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          const SizedBox(height: 24),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Column(
+                children: [
+                  Text(
+                    '${state.processedFiles}/${state.totalFiles}',
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.bold,
+                        ),
+                  ),
+                  const Text('Files Scanned'),
+                ],
+              ),
+              const SizedBox(width: 40),
+              Column(
+                children: [
+                  Text(
+                    '${state.duplicateCount}',
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.bold,
+                          color: Theme.of(context).colorScheme.error,
+                        ),
+                  ),
+                  const Text('Duplicates Found'),
+                ],
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          Text(
+            'Current file: ${state.currentFile}',
+            textAlign: TextAlign.center,
+            style: Theme.of(context).textTheme.bodySmall,
+            overflow: TextOverflow.ellipsis,
+          ),
+          const SizedBox(height: 24),
+          TextButton.icon(
+            icon: const Icon(Icons.cancel),
+            label: const Text("Cancel Scan"),
+            style: TextButton.styleFrom(
+              foregroundColor: Theme.of(context).colorScheme.error,
             ),
-            const SizedBox(height: 24),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Column(
-                  children: [
-                    Text(
-                      '${state.processedFiles}/${state.totalFiles}',
-                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    const Text('Files Scanned'),
-                  ],
-                ),
-                const SizedBox(width: 40),
-                Column(
-                  children: [
-                    Text(
-                      '${state.duplicateCount}',
-                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.bold,
-                        color: Theme.of(context).colorScheme.error,
-                      ),
-                    ),
-                    const Text('Duplicates Found'),
-                  ],
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            Text(
-              'Current file: ${state.currentFile}',
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.bodySmall,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ],
-        ),
+            onPressed: () {
+              context.read<ScanBloc>().add(CancelScanEvent());
+            },
+          ),
+        ],
       ),
-    );
-  }
+    ),
+  );
+}
+
+
 
   Widget _buildResultsHeader(BuildContext context, ScanState state) {
     if (state.duplicateGroups.isEmpty) return const SizedBox.shrink();
