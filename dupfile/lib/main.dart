@@ -1,14 +1,13 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' show log, pow;
 import 'package:file_picker/file_picker.dart';
 import 'package:crypto/crypto.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:path/path.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:intl/intl.dart';
-import 'dart:convert';
 
 void main() {
   sqfliteFfiInit();
@@ -23,19 +22,32 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Duplicate File Checker',
+      title: 'DuplicateFinder Pro',
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF4A6BFF),
+          seedColor: const Color(0xFF6200EE),
+          secondary: const Color(0xFF03DAC6),
           brightness: Brightness.light,
         ),
         useMaterial3: true,
         appBarTheme: const AppBarTheme(
-          elevation: 0,
+          elevation: 2,
           centerTitle: true,
-          titleTextStyle: TextStyle(
-            fontSize: 22,
-            fontWeight: FontWeight.w600,
+          titleTextStyle: TextStyle(fontSize: 22, fontWeight: FontWeight.w600),
+        ),
+        cardTheme: CardTheme(
+          elevation: 3,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+          ),
+        ),
+        elevatedButtonTheme: ElevatedButtonThemeData(
+          style: ElevatedButton.styleFrom(
+            elevation: 3,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+            padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 24),
           ),
         ),
         cardTheme: CardTheme(
@@ -53,12 +65,487 @@ class MyApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      themeMode: ThemeMode.system,
       home: const SplashScreenWrapper(),
     );
   }
 }
 
+// Data models
+class DuplicateGroup {
+  final String checksum;
+  final List<FileInfo> files;
+
+  DuplicateGroup({required this.checksum, required this.files});
+
+  int get totalSize => files.fold(0, (sum, file) => sum + file.size);
+  int get count => files.length;
+}
+
+class FileInfo {
+  final String path;
+  final String name;
+  final int size;
+  final DateTime modified;
+
+  FileInfo({
+    required this.path,
+    required this.name,
+    required this.size,
+    required this.modified,
+  });
+
+  factory FileInfo.fromFile(File file) {
+    return FileInfo(
+      path: file.path,
+      name: file.path.split(Platform.pathSeparator).last,
+      size: file.lengthSync(),
+      modified: file.lastModifiedSync(),
+    );
+  }
+}
+
+// Isolate Worker for file scanning
+class FileWorker {
+  static Future<String> computeChecksum(Map<String, dynamic> data) async {
+    final File file = File(data['path']);
+    try {
+      final digest = await sha256.bind(file.openRead()).first;
+      return digest.toString();
+    } catch (e) {
+      return 'error:${e.toString()}';
+    }
+  }
+}
+
+// Repository
+class FileCheckerRepository {
+  static Database? _db;
+  static const int _dbVersion = 3;
+
+  Future<Database> get database async {
+    if (_db != null) return _db!;
+    _db = await _initDB('duplicate_finder.db');
+    return _db!;
+  }
+
+  Future<Database> _initDB(String fileName) async {
+    final documentsDirectory = await getApplicationDocumentsDirectory();
+    final path = join(documentsDirectory.path, fileName);
+    return await databaseFactory.openDatabase(
+      path,
+      options: OpenDatabaseOptions(
+        version: _dbVersion,
+        onCreate: (db, version) async {
+          await db.execute('''CREATE TABLE files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            checksum TEXT NOT NULL,
+            path TEXT NOT NULL,
+            name TEXT NOT NULL,
+            size INTEGER NOT NULL,
+            modified INTEGER NOT NULL,
+            UNIQUE(path)
+          )''');
+
+          await db.execute('CREATE INDEX idx_checksum ON files (checksum)');
+        },
+      ),
+    );
+  }
+
+  Future<void> clearDatabase() async {
+    final db = await database;
+    await db.delete('files');
+  }
+
+  Future<void> insertFile(String checksum, FileInfo fileInfo) async {
+    final db = await database;
+    await db.insert('files', {
+      'checksum': checksum,
+      'path': fileInfo.path,
+      'name': fileInfo.name,
+      'size': fileInfo.size,
+      'modified': fileInfo.modified.millisecondsSinceEpoch,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<List<DuplicateGroup>> getDuplicates() async {
+    final db = await database;
+    final results = await db.rawQuery('''
+      SELECT checksum, COUNT(*) as count
+      FROM files
+      GROUP BY checksum
+      HAVING count > 1
+      ORDER BY count DESC, (
+        SELECT SUM(size) FROM files AS f 
+        WHERE f.checksum = files.checksum
+      ) DESC
+    ''');
+
+    final duplicateGroups = <DuplicateGroup>[];
+
+    for (final row in results) {
+      final checksum = row['checksum'] as String;
+      final fileRows = await db.query(
+        'files',
+        where: 'checksum = ?',
+        whereArgs: [checksum],
+        orderBy: 'size DESC',
+      );
+
+      final files =
+          fileRows
+              .map(
+                (fileRow) => FileInfo(
+                  path: fileRow['path'] as String,
+                  name: fileRow['name'] as String,
+                  size: fileRow['size'] as int,
+                  modified: DateTime.fromMillisecondsSinceEpoch(
+                    fileRow['modified'] as int,
+                  ),
+                ),
+              )
+              .toList();
+
+      duplicateGroups.add(DuplicateGroup(checksum: checksum, files: files));
+    }
+
+    return duplicateGroups;
+  }
+
+  // New methods for optimized scanning
+  Future<List<File>> collectFiles(
+    Directory dir, {
+    List<String> extensions = const [],
+  }) async {
+    final files = <File>[];
+
+    try {
+      await for (final entity in dir.list(
+        recursive: true,
+        followLinks: false,
+      )) {
+        if (entity is File) {
+          if (extensions.isEmpty ||
+              extensions.contains(extension(entity.path).toLowerCase())) {
+            files.add(entity);
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('Error listing directory: $e');
+    }
+
+    return files;
+  }
+
+  Future<Map<String, List<FileInfo>>> findDuplicatesBySize(
+    List<File> files,
+  ) async {
+    final sizeMap = <int, List<FileInfo>>{};
+
+    for (final file in files) {
+      try {
+        final fileInfo = FileInfo.fromFile(file);
+        sizeMap.putIfAbsent(fileInfo.size, () => []).add(fileInfo);
+      } catch (e) {
+        debugPrint('Error processing file size: $e');
+      }
+    }
+
+    // Filter out unique files by size
+    final potentialDuplicates = <int, List<FileInfo>>{};
+    sizeMap.forEach((size, fileInfos) {
+      if (fileInfos.length > 1 && size > 0) {
+        potentialDuplicates[size] = fileInfos;
+      }
+    });
+
+    return potentialDuplicates.map(
+      (key, value) => MapEntry(key.toString(), value),
+    );
+  }
+}
+
+// Bloc for state management
+enum ScanStatus { initial, scanning, completed, cancelled, error }
+
+class ScanState {
+  final ScanStatus status;
+  final List<DuplicateGroup> duplicateGroups;
+  final int processedFiles;
+  final int totalFiles;
+  final String currentFile;
+  final int duplicateCount;
+  final double progress;
+  final String scanPath;
+  final List<String> selectedExtensions;
+  final String error;
+  final bool useQuickScan;
+
+  ScanState({
+    this.status = ScanStatus.initial,
+    this.duplicateGroups = const [],
+    this.processedFiles = 0,
+    this.totalFiles = 0,
+    this.currentFile = '',
+    this.duplicateCount = 0,
+    this.progress = 0.0,
+    this.scanPath = '',
+    this.selectedExtensions = const [],
+    this.error = '',
+    this.useQuickScan = true,
+  });
+
+  ScanState copyWith({
+    ScanStatus? status,
+    List<DuplicateGroup>? duplicateGroups,
+    int? processedFiles,
+    int? totalFiles,
+    String? currentFile,
+    int? duplicateCount,
+    double? progress,
+    String? scanPath,
+    List<String>? selectedExtensions,
+    String? error,
+    bool? useQuickScan,
+  }) {
+    return ScanState(
+      status: status ?? this.status,
+      duplicateGroups: duplicateGroups ?? this.duplicateGroups,
+      processedFiles: processedFiles ?? this.processedFiles,
+      totalFiles: totalFiles ?? this.totalFiles,
+      currentFile: currentFile ?? this.currentFile,
+      duplicateCount: duplicateCount ?? this.duplicateCount,
+      progress: progress ?? this.progress,
+      scanPath: scanPath ?? this.scanPath,
+      selectedExtensions: selectedExtensions ?? this.selectedExtensions,
+      error: error ?? this.error,
+      useQuickScan: useQuickScan ?? this.useQuickScan,
+    );
+  }
+}
+
+abstract class ScanEvent {}
+
+class CancelScanEvent extends ScanEvent {}
+
+
+class SelectDirectoryEvent extends ScanEvent {
+  final bool useQuickScan;
+  final List<String> extensions;
+
+  SelectDirectoryEvent({this.useQuickScan = true, this.extensions = const []});
+}
+
+class UpdateProgressEvent extends ScanEvent {
+  final int processed;
+  final String currentFile;
+  final double progress;
+
+  UpdateProgressEvent({
+    required this.processed,
+    required this.currentFile,
+    required this.progress,
+  });
+}
+
+class CompleteScanEvent extends ScanEvent {
+  final List<DuplicateGroup> duplicateGroups;
+
+  CompleteScanEvent(this.duplicateGroups);
+}
+
+class ToggleQuickScanEvent extends ScanEvent {
+  final bool useQuickScan;
+
+  ToggleQuickScanEvent(this.useQuickScan);
+}
+
+class UpdateExtensionsEvent extends ScanEvent {
+  final List<String> extensions;
+
+  UpdateExtensionsEvent(this.extensions);
+}
+
+class ScanBloc extends Bloc<ScanEvent, ScanState> {
+  final FileCheckerRepository repository;
+  bool _isCancelled = false;
+
+  ScanBloc(this.repository) : super(ScanState()) {
+    on<SelectDirectoryEvent>(_onSelectDirectory);
+    on<UpdateProgressEvent>(_onUpdateProgress);
+    on<CompleteScanEvent>(_onCompleteScan);
+    on<ToggleQuickScanEvent>(_onToggleQuickScan);
+    on<UpdateExtensionsEvent>(_onUpdateExtensions);
+    on<CancelScanEvent>(_onCancelScan);
+  }
+
+  void _onCancelScan(CancelScanEvent event, Emitter<ScanState> emit) {
+  _isCancelled = true;
+  emit(state.copyWith(status: ScanStatus.initial)); // <-- back to idle
+}
+
+  Future<void> _onSelectDirectory(
+    SelectDirectoryEvent event,
+    Emitter<ScanState> emit,
+  ) async {
+
+    _isCancelled = false;
+
+    final directory = await FilePicker.platform.getDirectoryPath();
+    if (directory == null) return;
+
+    emit(
+      state.copyWith(
+        status: ScanStatus.scanning,
+        duplicateGroups: [],
+        processedFiles: 0,
+        totalFiles: 0,
+        currentFile: '',
+        duplicateCount: 0,
+        progress: 0,
+        scanPath: directory,
+        useQuickScan: event.useQuickScan,
+        selectedExtensions: event.extensions,
+      ),
+    );
+
+    try {
+      await repository.clearDatabase();
+
+      final selectedDir = Directory(directory);
+      final files = await repository.collectFiles(
+        selectedDir,
+        extensions: state.selectedExtensions,
+      );
+
+      emit(state.copyWith(totalFiles: files.length));
+
+      // Quick scan mode - first group by size
+      if (state.useQuickScan && files.length > 100) {
+        final sizeGroups = await repository.findDuplicatesBySize(files);
+
+        int processed = 0;
+        int duplicateCount = 0;
+
+        // Process only potential duplicates (same size files)
+        for (final entry in sizeGroups.entries) {
+          final sameSize = entry.value;
+
+          for (int i = 0; i < sameSize.length; i++) {
+            if (_isCancelled || isClosed) return; {
+              final fileInfo = sameSize[i];
+
+              emit(
+                state.copyWith(
+                  processedFiles: processed + 1,
+                  currentFile: fileInfo.name,
+                  progress: (processed + 1) / files.length,
+                ),
+              );
+
+              final result = await Isolate.run(
+                () => FileWorker.computeChecksum({'path': fileInfo.path}),
+              );
+
+              if (!result.startsWith('error:')) {
+                await repository.insertFile(result, fileInfo);
+              }
+
+              processed++;
+            }
+          }
+        }
+
+        final duplicates = await repository.getDuplicates();
+        duplicateCount = duplicates.fold(
+          0,
+          (count, group) => count + group.count - 1,
+        );
+
+        if (!isClosed) add(CompleteScanEvent(duplicates));
+
+      } else {
+        // Standard full scan
+        int processed = 0;
+        int duplicateCount = 0;
+
+        for (final file in files) {
+          if (_isCancelled || isClosed) return; 
+
+          final fileInfo = FileInfo.fromFile(file);
+
+          add(
+            UpdateProgressEvent(
+              processed: processed + 1,
+              currentFile: fileInfo.name,
+              progress: (processed + 1) / files.length,
+            ),
+          );
+
+          final result = await Isolate.run(
+            () => FileWorker.computeChecksum({'path': fileInfo.path}),
+          );
+
+          if (!result.startsWith('error:')) {
+            await repository.insertFile(result, fileInfo);
+
+            // Check current duplicate count periodically
+            if (processed % 10 == 0 || processed == files.length - 1) {
+              final duplicates = await repository.getDuplicates();
+              duplicateCount = duplicates.fold(
+                0,
+                (count, group) => count + group.count - 1,
+              );
+
+              emit(state.copyWith(duplicateCount: duplicateCount));
+            }
+          }
+
+          processed++;
+        }
+
+        final duplicates = await repository.getDuplicates();
+        add(CompleteScanEvent(duplicates));
+      }
+    } catch (e) {
+      emit(state.copyWith(status: ScanStatus.error, error: e.toString()));
+    }
+  }
+
+  void _onUpdateProgress(UpdateProgressEvent event, Emitter<ScanState> emit) {
+    emit(
+      state.copyWith(
+        processedFiles: event.processed,
+        currentFile: event.currentFile,
+        progress: event.progress,
+      ),
+    );
+  }
+
+  void _onCompleteScan(CompleteScanEvent event, Emitter<ScanState> emit) {
+    emit(
+      state.copyWith(
+        status: ScanStatus.completed,
+        duplicateGroups: event.duplicateGroups,
+        currentFile: '',
+      ),
+    );
+  }
+
+  void _onToggleQuickScan(ToggleQuickScanEvent event, Emitter<ScanState> emit) {
+    emit(state.copyWith(useQuickScan: event.useQuickScan));
+  }
+
+  void _onUpdateExtensions(
+    UpdateExtensionsEvent event,
+    Emitter<ScanState> emit,
+  ) {
+    emit(state.copyWith(selectedExtensions: event.extensions));
+  }
+}
+
+// Splash Screen
 class SplashScreenWrapper extends StatefulWidget {
   const SplashScreenWrapper({super.key});
 
@@ -66,9 +553,7 @@ class SplashScreenWrapper extends StatefulWidget {
   State<SplashScreenWrapper> createState() => _SplashScreenWrapperState();
 }
 
-class _SplashScreenWrapperState extends State<SplashScreenWrapper>
-    with SingleTickerProviderStateMixin {
-  bool _showHome = false;
+class _SplashScreenWrapperState extends State<SplashScreenWrapper> with SingleTickerProviderStateMixin {
   late AnimationController _controller;
   late Animation<double> _animation;
 
@@ -99,12 +584,17 @@ class _SplashScreenWrapperState extends State<SplashScreenWrapper>
 
   @override
   Widget build(BuildContext context) {
-    return _showHome
-        ? const HomeScreen()
-        : FadeTransition(
-            opacity: _animation,
-            child: const SplashScreen(),
-          );
+    return FutureBuilder(
+      future: Future.delayed(const Duration(seconds: 2)),
+      builder: (context, snapshot) {
+        return snapshot.connectionState == ConnectionState.done
+            ? const HomeScreen()
+            : FadeTransition(
+                opacity: _controller,
+                child: const SplashScreen(),
+              );
+      },
+    );
   }
 }
 
@@ -113,23 +603,43 @@ class SplashScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+
     return Scaffold(
-      backgroundColor: Theme.of(context).colorScheme.background,
+      backgroundColor: Theme.of(context).colorScheme.surface,
       body: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Container(
-              padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.primary.withOpacity(0.1),
-                shape: BoxShape.circle,
-              ),
-              child: Icon(
-                Icons.find_in_page,
-                size: 60,
-                color: Theme.of(context).colorScheme.primary,
-              ),
+            TweenAnimationBuilder<double>(
+              tween: Tween<double>(begin: 0.0, end: 1.0),
+              duration: const Duration(milliseconds: 800),
+              curve: Curves.easeOutBack,
+              builder: (context, value, child) {
+                return Transform.scale(
+                  scale: value,
+                  child: Container(
+                    width: 120,
+                    height: 120,
+                    padding: const EdgeInsets.all(20),
+                    decoration: BoxDecoration(
+                      color: colorScheme.primary.withOpacity(0.2),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: colorScheme.primary.withOpacity(0.4),
+                        shape: BoxShape.circle,
+                      ),
+                      child: Icon(
+                        Icons.insert_drive_file,
+                        size: 60,
+                        color: colorScheme.primary,
+                      ),
+                    ),
+                  ),
+                );
+              },
             ),
             const SizedBox(height: 24),
             Text(
@@ -137,18 +647,7 @@ class SplashScreen extends StatelessWidget {
               style: TextStyle(
                 fontSize: 24,
                 fontWeight: FontWeight.bold,
-                color: Theme.of(context).colorScheme.onBackground,
-              ),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'Find and manage duplicate files',
-              style: TextStyle(
-                fontSize: 14,
-                color: Theme.of(context)
-                    .colorScheme
-                    .onBackground
-                    .withOpacity(0.7),
+                color: Theme.of(context).colorScheme.onSurface,
               ),
             ),
           ],
@@ -160,6 +659,7 @@ class SplashScreen extends StatelessWidget {
 
 class DBHelper {
   static Database? _db;
+  static const int _dbVersion = 2;
 
   static Future<Database> get database async {
     if (_db != null) return _db!;
@@ -173,79 +673,70 @@ class DBHelper {
     return await databaseFactory.openDatabase(
       path,
       options: OpenDatabaseOptions(
-        version: 1,
+        version: _dbVersion,
         onCreate: (db, version) async {
-          await db.execute('''
-            CREATE TABLE checksums (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              checksum TEXT,
-              filePath TEXT UNIQUE,
-              fileName TEXT,
-              fileSize INTEGER,
-              fileModified TEXT,
-              scanRoot TEXT
-            )
-          ''');
+          await _createTables(db);
+        },
+        onUpgrade: (db, oldVersion, newVersion) async {
+          if (oldVersion < 2) {
+            await _migrateV1ToV2(db);
+          }
         },
       ),
     );
   }
 
-  static Future<void> insertChecksumIfNotExists(
-    String checksum,
-    String filePath,
-    String fileName,
-    int fileSize,
-    String fileModified,
-    String scanRoot,
-  ) async {
-    final db = await database;
-    final existing = await db.query(
-      'checksums',
-      where: 'filePath = ?',
-      whereArgs: [filePath],
-    );
-    if (existing.isEmpty) {
-      await db.insert('checksums', {
-        'checksum': checksum,
-        'filePath': filePath,
-        'fileName': fileName,
-        'fileSize': fileSize,
-        'fileModified': fileModified,
-        'scanRoot': scanRoot,
-      });
+  static Future<void> _createTables(Database db) async {
+    await db.execute('''CREATE TABLE checksums (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        checksum TEXT,
+        filePath TEXT,
+        fileName TEXT,
+        fileSize INTEGER,
+        lastModified INTEGER
+      )''');
+  }
+
+  static Future<void> _migrateV1ToV2(Database db) async {
+    try {
+      await db.execute('ALTER TABLE checksums ADD COLUMN fileName TEXT');
+      await db.execute('ALTER TABLE checksums ADD COLUMN fileSize INTEGER DEFAULT 0');
+      await db.execute('ALTER TABLE checksums ADD COLUMN lastModified INTEGER DEFAULT 0');
+    } catch (e) {
+      debugPrint('Migration error: $e');
+      await db.execute('DROP TABLE IF EXISTS checksums');
+      await _createTables(db);
     }
   }
 
-  static Future<List<Map<String, dynamic>>> getDuplicates(String scanRoot) async {
+  static Future<void> insertChecksum(String checksum, File file) async {
     final db = await database;
-    return await db.rawQuery('''
-      SELECT checksum, GROUP_CONCAT(filePath, "||") as files, SUM(fileSize) as totalSize, COUNT(*) as count
-      FROM checksums
-      WHERE scanRoot = ?
-      GROUP BY checksum
-      HAVING count > 1
-    ''', [scanRoot]);
+    await db.insert('checksums', {
+      'checksum': checksum,
+      'filePath': file.path,
+      'fileName': file.path.split(Platform.pathSeparator).last,
+      'fileSize': await file.length(),
+      'lastModified': (await file.lastModified()).millisecondsSinceEpoch,
+    });
   }
 
-  static Future<void> deleteFileRecord(String filePath) async {
+  static Future<List<Map<String, dynamic>>> getDuplicates() async {
     final db = await database;
-    await db.delete('checksums', where: 'filePath = ?', whereArgs: [filePath]);
+    return await db.rawQuery('''SELECT checksum, 
+                                        GROUP_CONCAT(filePath, "||") as files,
+                                        GROUP_CONCAT(fileName, "||") as fileNames,
+                                        GROUP_CONCAT(fileSize, "||") as fileSizes,
+                                        GROUP_CONCAT(lastModified, "||") as lastModifieds,
+                                        COUNT(*) as count
+                                FROM checksums
+                                GROUP BY checksum
+                                HAVING count > 1
+                                ORDER BY fileSize DESC''');
   }
 
   static Future<void> clearDatabase() async {
     final db = await database;
     await db.delete('checksums');
-  }
-}
-
-Future<void> openDirectoryInExplorer(String filePath) async {
-  final directoryPath = File(filePath).parent.path;
-  if (await Directory(directoryPath).exists()) {
-    final uri = Uri.file(directoryPath);
-    if (await canLaunchUrl(uri)) {
-      await launchUrl(uri);
-    }
   }
 }
 
@@ -256,108 +747,111 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
-  bool _isScanning = false;
-  double _progress = 0;
-  int _total = 0;
-  int _processed = 0;
-  int _duplicateCount = 0;
-  int _totalDuplicateSize = 0;
-  String _currentFile = '';
+class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   List<Map<String, dynamic>> _duplicateFiles = [];
-  bool _cancelRequested = false;
+  bool _isScanning = false;
+  int _processed = 0;
+  int _total = 0;
+  String _currentFile = '';
+  int _duplicateCount = 0;
+  double _progress = 0;
+  late AnimationController _scanController;
+
+  @override
+  void initState() {
+    super.initState();
+    _scanController = AnimationController(
+      duration: const Duration(milliseconds: 1000),
+      vsync: this,
+    );
+  }
+
+  @override
+  void dispose() {
+    _scanController.dispose();
+    super.dispose();
+  }
 
   Future<void> _scanForDuplicates() async {
+    final directory = await FilePicker.platform.getDirectoryPath();
+    if (directory == null) return;
+
     setState(() {
       _isScanning = true;
-      _progress = 0;
-      _processed = 0;
-      _duplicateCount = 0;
-      _totalDuplicateSize = 0;
-      _currentFile = '';
       _duplicateFiles = [];
-      _cancelRequested = false;
+      _processed = 0;
+      _total = 0;
+      _currentFile = '';
+      _duplicateCount = 0;
+      _progress = 0;
     });
 
-    String? selectedDirectory = await FilePicker.platform.getDirectoryPath();
-    if (selectedDirectory == null) {
-      setState(() => _isScanning = false);
-      return;
-    }
+    await DBHelper.clearDatabase();
+    final files = await _collectFiles(Directory(directory));
+    _total = files.length;
 
-    final String scanRoot = selectedDirectory;
-    List<FileSystemEntity> allFiles = Directory(selectedDirectory)
-        .listSync(recursive: true, followLinks: false)
-        .whereType<File>()
-        .toList();
-
-    _total = allFiles.length;
-
-    for (var file in allFiles) {
-      if (_cancelRequested) break;
+    for (final file in files) {
+      if (!mounted) return;
 
       setState(() {
-        _currentFile = file.path;
+        _currentFile = file.path.split(Platform.pathSeparator).last;
         _processed++;
         _progress = _processed / _total;
       });
 
       try {
-        var bytes = await File(file.path).readAsBytes();
-        var digest = sha256.convert(bytes);
-        var stat = await file.stat();
-
-        await DBHelper.insertChecksumIfNotExists(
-          digest.toString(),
-          file.path,
-          file.uri.pathSegments.last,
-          stat.size,
-          DateFormat('yyyy-MM-dd HH:mm:ss').format(stat.modified),
-          scanRoot,
-        );
-      } catch (_) {}
-    }
-
-    List<Map<String, dynamic>> duplicates = await DBHelper.getDuplicates(scanRoot);
-    int totalSize = 0;
-    for (var item in duplicates) {
-      totalSize += item['totalSize'] as int;
-    }
-
-    setState(() {
-      _isScanning = false;
-      _duplicateFiles = duplicates;
-      _duplicateCount = duplicates.length;
-      _totalDuplicateSize = totalSize;
-    });
-  }
-
-  void _cancelScan() {
-    setState(() => _cancelRequested = true);
-  }
-
-  void _clearDuplicates() async {
-    for (var group in _duplicateFiles) {
-      final files = (group['files'] as String).split('||');
-      for (var i = 1; i < files.length; i++) {
-        try {
-          await File(files[i]).delete();
-          await DBHelper.deleteFileRecord(files[i]);
-        } catch (_) {}
+        final digest = await sha256.bind(file.openRead()).first;
+        await DBHelper.insertChecksum(digest.toString(), file);
+        final duplicates = await DBHelper.getDuplicates();
+        setState(() {
+          _duplicateCount = duplicates.fold(0, (acc, item) => acc + (item['count'] as int) - 1);
+        });
+      } catch (e) {
+        debugPrint('Error processing file ${file.path}: $e');
       }
     }
 
-    List<Map<String, dynamic>> updated = await DBHelper.getDuplicates("");
-    int totalSize = 0;
-    for (var item in updated) {
-      totalSize += item['totalSize'] as int;
+    final duplicates = await DBHelper.getDuplicates();
+    if (mounted) {
+      setState(() {
+        _isScanning = false;
+        _duplicateFiles = duplicates;
+        _currentFile = '';
+      });
+      _scanController.forward();
     }
+  }
 
-    setState(() {
-      _duplicateFiles = updated;
-      _duplicateCount = updated.length;
-      _totalDuplicateSize = totalSize;
-    });
+  Future<List<File>> _collectFiles(Directory dir) async {
+    final files = <File>[];
+    try {
+      await for (final entity in dir.list(recursive: true)) {
+        if (entity is File) {
+          files.add(entity);
+        }
+      }
+    } catch (e) {
+      debugPrint('Error listing directory: $e');
+    }
+    return files;
+  }
+
+  Future<void> _openFileLocation(String path) async {
+    final uri = Uri.file(File(path).parent.path);
+    if (await canLaunchUrl(uri)) {
+      await launchUrl(uri);
+    }
+  }
+
+  String _formatBytes(int bytes) {
+    if (bytes <= 0) return '0 B';
+    const suffixes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    final i = (log(bytes) / log(1024)).floor();
+    return '${(bytes / pow(1024, i)).toStringAsFixed(1)} ${suffixes[i]}';
+  }
+
+  String _formatDate(int timestamp) {
+    return DateTime.fromMillisecondsSinceEpoch(timestamp).toString().split(' ')[0];
   }
 
   @override
@@ -377,13 +871,50 @@ class _HomeScreenState extends State<HomeScreen> {
                     fontWeight: FontWeight.bold,
                   ),
                 ),
-              ),
+              ],
             ),
-        ],
+          ),
+      ],
+    );
+  }
+
+  Widget _buildScanButton(BuildContext context, ScanState state) {
+    return ElevatedButton.icon(
+      onPressed: (state.status == ScanStatus.scanning)
+    ? null
+    : () => context.read<ScanBloc>().add(
+          SelectDirectoryEvent(
+            useQuickScan: state.useQuickScan,
+            extensions: _selectedExtensions,
+          ),
+        ),
+
+      icon: Icon(
+        state.status == ScanStatus.scanning
+            ? Icons.hourglass_top
+            : Icons.search,
+        size: 28,
       ),
-      body: Padding(
+      label: Text(
+        state.status == ScanStatus.scanning
+            ? 'Scanning...'
+            : 'Scan for Duplicates',
+        style: const TextStyle(fontSize: 18),
+      ),
+      style: ElevatedButton.styleFrom(
+        minimumSize: const Size.fromHeight(56),
+        backgroundColor: Theme.of(context).colorScheme.primary,
+        foregroundColor: Theme.of(context).colorScheme.onPrimary,
+      ),
+    );
+  }
+
+  Widget _buildScanOptions(BuildContext context, ScanState state) {
+    return Card(
+      child: Padding(
         padding: const EdgeInsets.all(16.0),
         child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             ElevatedButton.icon(
               onPressed: _isScanning ? null : _scanForDuplicates,
@@ -391,136 +922,104 @@ class _HomeScreenState extends State<HomeScreen> {
               label: const Text('Scan for Duplicates'),
               style: ElevatedButton.styleFrom(
                 minimumSize: const Size.fromHeight(50),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                ),
               ),
             ),
             const SizedBox(height: 20),
-            if (_isScanning) ...[
-              LinearProgressIndicator(value: _progress),
-              const SizedBox(height: 16),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  const Text('Processing files...'),
-                  Text('$_processed/$_total'),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Text(
-                _currentFile,
-                overflow: TextOverflow.ellipsis,
-              ),
-              const SizedBox(height: 16),
-              Text('Found $_duplicateCount duplicate files'),
-              const SizedBox(height: 16),
-              ElevatedButton.icon(
-                onPressed: _cancelScan,
-                icon: const Icon(Icons.cancel),
-                label: const Text('Cancel Scan'),
-              ),
-            ] else ...[
-              if (_duplicateFiles.isEmpty)
-                Expanded(
-                  child: Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(Icons.folder_open, size: 60, color: Colors.grey),
-                        const SizedBox(height: 16),
-                        const Text('No duplicates found'),
-                      ],
-                    ),
-                  ),
-                )
-              else
-                Expanded(
-                  child: Column(
-                    children: [
-                      Text(
-                        'Total duplicate size: ${(_totalDuplicateSize / (1024 * 1024)).toStringAsFixed(2)} MB',
-                        style: const TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                      const SizedBox(height: 8),
-                      ElevatedButton.icon(
-                        onPressed: _clearDuplicates,
-                        icon: const Icon(Icons.delete_forever),
-                        label: const Text('Clear Duplicates'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.red,
-                          foregroundColor: Colors.white,
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      Expanded(
-                        child: ListView.builder(
-                          itemCount: _duplicateFiles.length,
-                          itemBuilder: (context, index) {
-                            final item = _duplicateFiles[index];
-                            final files =
-                                (item['files'] as String).split('||');
-                            return Card(
-                              child: Padding(
-                                padding: const EdgeInsets.all(16),
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Row(
-                                      children: [
-                                        CircleAvatar(
-                                          child: Text('${item['count']}'),
-                                        ),
-                                        const SizedBox(width: 12),
-                                        Expanded(
-                                          child: Text(
-                                            'Duplicate group ${index + 1}',
-                                            style: const TextStyle(
-                                              fontWeight: FontWeight.bold,
-                                              fontSize: 16,
-                                            ),
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                    const SizedBox(height: 12),
-                                    ...files.map(
-                                      (filePath) => ListTile(
-                                        contentPadding: EdgeInsets.zero,
-                                        leading:
-                                            const Icon(Icons.insert_drive_file),
-                                        title: Text(
-                                          filePath.split('/').last,
-                                          overflow: TextOverflow.ellipsis,
-                                        ),
-                                        subtitle: Text(
-                                          filePath,
-                                          overflow: TextOverflow.ellipsis,
-                                          style: const TextStyle(fontSize: 12),
-                                        ),
-                                        trailing: IconButton(
-                                          icon: const Icon(Icons.folder_open),
-                                          onPressed: () =>
-                                              openDirectoryInExplorer(filePath),
-                                        ),
-                                        onTap: () =>
-                                            openDirectoryInExplorer(filePath),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            );
-                          },
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-            ],
+            if (_isScanning) _buildScanProgress(context),
+            if (!_isScanning) _buildResults(context),
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildScanProgress(BuildContext context) {
+    return Expanded(
+      child: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            CircularProgressIndicator(
+              value: _progress,
+              strokeWidth: 8,
+            ),
+            const SizedBox(height: 20),
+            Text(
+              'Scanning... $_processed/$_total',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 10),
+            Text(
+              _currentFile,
+              style: Theme.of(context).textTheme.bodySmall,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildResults(BuildContext context) {
+    if (_duplicateFiles.isEmpty) {
+      return Expanded(
+        child: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                Icons.folder_open,
+                size: 60,
+                color: Theme.of(context).disabledColor,
+              ),
+              const SizedBox(height: 16),
+              const Text('No duplicates found'),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Expanded(
+      child: ListView.builder(
+        itemCount: _duplicateFiles.length,
+        itemBuilder: (context, index) {
+          final group = _duplicateFiles[index];
+          final files = (group['files'] as String).split('||');
+          final names = (group['fileNames'] as String).split('||');
+          final sizes = (group['fileSizes'] as String).split('||').map(int.parse).toList();
+          final modified = (group['lastModifieds'] as String).split('||').map(int.parse).toList();
+
+          return Card(
+            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            color: Colors.red.shade50, // Highlight duplicates with red
+            child: ExpansionTile(
+              title: Text(
+                '${group['count']} duplicates (${_formatBytes(sizes.reduce((a, b) => a + b))})',
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+              children: List.generate(files.length, (i) => ListTile(
+                leading: const Icon(Icons.insert_drive_file),
+                title: Text(names[i]),
+                subtitle: Text(
+                  '${_formatBytes(sizes[i])} • ${_formatDate(modified[i])}',
+                ),
+                trailing: IconButton(
+                  icon: const Icon(Icons.folder_open),
+                  onPressed: () => _openFileLocation(files[i]),
+                ),
+                onTap: () => _openFileLocation(files[i]),
+              )),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildEmptyState(BuildContext context) {
+    return const SliverFillRemaining(
+      child: SizedBox.shrink(), // renders nothing
     );
   }
 }
