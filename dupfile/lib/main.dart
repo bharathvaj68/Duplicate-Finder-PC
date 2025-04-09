@@ -464,7 +464,9 @@ class ScanBloc extends Bloc<ScanEvent, ScanState> {
           (count, group) => count + group.count - 1,
         );
 
-        if (!isClosed) add(CompleteScanEvent(duplicates));
+        if (!_isCancelled && !isClosed) {
+  add(CompleteScanEvent(duplicates));
+}
 
       } else {
         // Standard full scan
@@ -507,7 +509,9 @@ class ScanBloc extends Bloc<ScanEvent, ScanState> {
         }
 
         final duplicates = await repository.getDuplicates();
-        add(CompleteScanEvent(duplicates));
+        if (!_isCancelled && !isClosed) {
+  add(CompleteScanEvent(duplicates));
+}
       }
     } catch (e) {
       emit(state.copyWith(status: ScanStatus.error, error: e.toString()));
@@ -703,38 +707,55 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     return BlocBuilder<ScanBloc, ScanState>(
       builder: (context, state) {
         return Scaffold(
-          body: CustomScrollView(
-            slivers: [
-              _buildAppBar(context, state),
-              SliverPadding(
-                padding: const EdgeInsets.all(16.0),
-                sliver: SliverToBoxAdapter(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      _buildScanButton(context, state),
-                      const SizedBox(height: 16),
-                      _buildScanOptions(context, state),
-                      if (_showExtensionFilter) ...[
-                        const SizedBox(height: 16),
-                        _buildExtensionFilter(context),
-                      ],
-                      const SizedBox(height: 24),
-                      if (state.status == ScanStatus.scanning)
-                        _buildScanProgress(context, state)
-                      else if (state.status == ScanStatus.completed)
-                        _buildResultsHeader(context, state),
-                    ],
-                  ),
-                ),
-              ),
-              if (state.status == ScanStatus.completed)
-                _buildResultsList(context, state)
-              else if (state.status == ScanStatus.initial)
-                _buildEmptyState(context),
+  body: CustomScrollView(
+    slivers: [
+      _buildAppBar(context, state),
+      SliverPadding(
+        padding: const EdgeInsets.all(16.0),
+        sliver: SliverToBoxAdapter(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _buildScanButton(context, state),
+              const SizedBox(height: 16),
+              _buildScanOptions(context, state),
+              if (_showExtensionFilter) ...[
+                const SizedBox(height: 16),
+                _buildExtensionFilter(context),
+              ],
+              const SizedBox(height: 24),
+              if (state.status == ScanStatus.scanning)
+                _buildScanProgress(context, state)
+              else if (state.status == ScanStatus.completed &&
+                  state.duplicateGroups.isNotEmpty)
+                _buildResultsHeader(context, state),
             ],
           ),
-        );
+        ),
+      ),
+
+      // Show this only if no duplicates found
+      if (state.status == ScanStatus.completed &&
+          state.duplicateGroups.isEmpty)
+        _buildNoDuplicatesFoundMessage(context, state)
+
+      // Show the results list if duplicates found
+      else if (state.status == ScanStatus.completed &&
+               state.duplicateGroups.isNotEmpty)
+        _buildResultsList(context, state)
+
+      // Show a message when app first loads
+      else if (state.status == ScanStatus.initial)
+        SliverFillRemaining(
+          hasScrollBody: false,
+          child: Center(
+            child: Text("Start a scan to find duplicate files."),
+          ),
+        ),
+    ],
+  ),
+);
+
       },
     );
   }
@@ -1185,9 +1206,27 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     );
   }
 
-  Widget _buildEmptyState(BuildContext context) {
-    return const SliverFillRemaining(
-      child: SizedBox.shrink(), // renders nothing
+  Widget _buildNoDuplicatesFoundMessage(BuildContext context, ScanState state) {
+  if (state.status == ScanStatus.completed && state.duplicateGroups.isEmpty) {
+    return SliverFillRemaining(
+      hasScrollBody: false,
+      child: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.check_circle_outline, size: 64, color: Colors.green),
+            const SizedBox(height: 16),
+            Text(
+              'No duplicate files found!',
+              style: Theme.of(context).textTheme.titleMedium,
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+      ),
     );
   }
+
+  return const SliverToBoxAdapter(child: SizedBox.shrink()); // Renders nothing
+}
 }
