@@ -376,6 +376,11 @@ class UpdateExtensionsEvent extends ScanEvent {
 
 class RescanDirectoryEvent extends ScanEvent {}
 
+class RemoveDuplicateGroupEvent extends ScanEvent {
+  final DuplicateGroup group;
+  RemoveDuplicateGroupEvent(this.group);
+}
+
 class ScanBloc extends Bloc<ScanEvent, ScanState> {
   final FileCheckerRepository repository;
   bool _isCancelled = false;
@@ -389,12 +394,24 @@ class ScanBloc extends Bloc<ScanEvent, ScanState> {
     on<UpdateExtensionsEvent>(_onUpdateExtensions);
     on<CancelScanEvent>(_onCancelScan);
     on<RescanDirectoryEvent>(_onRescanDirectory);
+    on<RemoveDuplicateGroupEvent>(_onRemoveDuplicateGroup);
+
   }
 
   void _onCancelScan(CancelScanEvent event, Emitter<ScanState> emit) {
     _isCancelled = true;
     emit(state.copyWith(status: ScanStatus.initial));
   }
+
+  void _onRemoveDuplicateGroup(
+  RemoveDuplicateGroupEvent event,
+  Emitter<ScanState> emit,
+) {
+  final updatedGroups = List<DuplicateGroup>.from(state.duplicateGroups)
+    ..removeWhere((g) => g == event.group);
+
+  emit(state.copyWith(duplicateGroups: updatedGroups));
+}
 
   Future<void> _onSelectDirectory(
     SelectDirectoryEvent event,
@@ -716,6 +733,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   ];
   final List<String> _selectedExtensions = [];
   bool _showExtensionFilter = false;
+  final Map<DuplicateGroup, bool> _groupVisibility = {};
 
   @override
   Widget build(BuildContext context) {
@@ -733,6 +751,15 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
             children: [
               _buildScanButton(context, state),
               const SizedBox(height: 16),
+              ElevatedButton.icon(
+                 onPressed: _openDupBinFolder,
+                 icon: const Icon(Icons.recycling_outlined),
+                 label: const Text('Open Recycle Bin'),
+                 style: ElevatedButton.styleFrom(
+                 backgroundColor: Theme.of(context).colorScheme.primaryContainer,
+                 foregroundColor: Theme.of(context).colorScheme.onPrimaryContainer,
+                 ),
+                ),
               _buildScanOptions(context, state),
               if (_showExtensionFilter) ...[
                 const SizedBox(height: 16),
@@ -744,6 +771,8 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
               else if (state.status == ScanStatus.completed &&
                   state.duplicateGroups.isNotEmpty)
                 _buildResultsHeader(context, state),
+                const SizedBox(height: 8),
+                
             ],
           ),
         ),
@@ -775,6 +804,24 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     );
   }
 
+
+//_openDupBinFolder is used when open recycle bin button is pressed
+Future<void> _openDupBinFolder() async {
+  final docsDir = await getApplicationDocumentsDirectory();
+  final dupBin = Directory('${docsDir.path}${Platform.pathSeparator}dupbin');
+
+  if (!await dupBin.exists()) {
+    await dupBin.create(recursive: true);
+  }
+
+  if (Platform.isWindows) {
+    await Process.run('explorer', [dupBin.path]);
+  } else if (Platform.isMacOS) {
+    await Process.run('open', [dupBin.path]);
+  } else if (Platform.isLinux) {
+    await Process.run('xdg-open', [dupBin.path]);
+  }
+}
   Widget _buildAppBar(BuildContext context, ScanState state) {
     return SliverAppBar(
       expandedHeight: 120,
@@ -1058,13 +1105,27 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
 }
 
 
-
+// it is the page shows after duplicates found
   Widget _buildResultsHeader(BuildContext context, ScanState state) {
   if (state.duplicateGroups.isEmpty) return const SizedBox.shrink();
 
   final totalSize = state.duplicateGroups.fold(0, (total, group) {
-    return total + group.totalSize ~/ group.count * (group.count - 1);
+  if (group.files.length <= 1) return total;
+
+  final sortedFiles = List.of(group.files);
+  sortedFiles.sort((a, b) {
+    final aModified = File(a.path).lastModifiedSync();
+    final bModified = File(b.path).lastModifiedSync();
+    return aModified.compareTo(bModified);
   });
+
+  // Keep the oldest, sum the rest
+  final duplicatesSize = sortedFiles.skip(1).fold<int>(0, (sum, file) {
+    return sum + File(file.path).lengthSync();
+  });
+
+  return total + duplicatesSize;
+});
 
   return Card(
     color: Theme.of(context).colorScheme.secondaryContainer,
@@ -1107,7 +1168,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
               ElevatedButton.icon(
                 icon: const Icon(Icons.delete),
                 label: const Text("Delete Duplicates"),
-                onPressed: () => _deleteAllDuplicates(context, state),
+                onPressed: () => _deleteAllDuplicates(context, state), //func in ln 1164
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Theme.of(context).colorScheme.errorContainer,
                   foregroundColor: Theme.of(context).colorScheme.onErrorContainer,
@@ -1121,6 +1182,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   );
 }
 
+// deleteAllDuplicates function to be used onPressed
 Future<void> _deleteAllDuplicates(BuildContext context, ScanState state) async {
   final dupBin = await _getDupBinDirectory();
 
@@ -1163,7 +1225,7 @@ Future<void> _deleteAllDuplicates(BuildContext context, ScanState state) async {
 
   if (context.mounted) {
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Duplicates moved to Documents/dupbin')),
+      const SnackBar(content: Text('Duplicates moved to Documents/dupbin')), // alert bar when all dups are deleted
     );
     context.read<ScanBloc>().add(RescanDirectoryEvent());
   }
@@ -1191,65 +1253,175 @@ Future<Directory> _getDupBinDirectory() async {
   }
 
   Widget _buildResultsList(BuildContext context, ScanState state) {
-    return SliverList(
-      delegate: SliverChildBuilderDelegate((context, index) {
-        final group = state.duplicateGroups[index];
-        return _buildDuplicateGroupCard(context, group, index);
-      }, childCount: state.duplicateGroups.length),
-    );
+  for (var group in state.duplicateGroups) {
+    _groupVisibility.putIfAbsent(group, () => true);
   }
 
-  Widget _buildDuplicateGroupCard(
-    BuildContext context,
-    DuplicateGroup group,
-    int index,
-  ) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      child: Card(
-        child: ExpansionTile(
-          title: Row(
-            children: [
-              Text(
-                '${group.count} duplicates',
-                style: const TextStyle(fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(width: 8),
-              Text(
-                '(${_formatSize(group.totalSize)})',
-                style: TextStyle(
-                  color: Theme.of(context).colorScheme.primary.withOpacity(0.7),
+  return SliverList(
+    delegate: SliverChildBuilderDelegate(
+      (context, index) {
+        final group = state.duplicateGroups[index];
+        return _buildDuplicateGroupCard(
+          context,
+          group,
+          index,
+          _groupVisibility[group] ?? true,
+          () async {
+            setState(() {
+              _groupVisibility[group] = false;
+            });
+
+            await Future.delayed(const Duration(milliseconds: 400));
+
+            await _deleteGroupDuplicates(
+              context,
+              group,
+              () {
+                context.read<ScanBloc>().add(RemoveDuplicateGroupEvent(group));
+              },
+            );
+          },
+        );
+      },
+      childCount: state.duplicateGroups.length,
+    ),
+  );
+}
+
+
+
+//separate group duplicate cards
+ Widget _buildDuplicateGroupCard(
+  BuildContext context,
+  DuplicateGroup group,
+  int index,
+  bool isVisible,
+  VoidCallback onDelete,
+) {
+  return AnimatedOpacity(
+    opacity: isVisible ? 1.0 : 0.0,
+    duration: const Duration(milliseconds: 400),
+    curve: Curves.easeOut,
+    child: AnimatedSize(
+      duration: const Duration(milliseconds: 400),
+      curve: Curves.easeOut,
+      child: isVisible
+          ? Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: Card(
+                child: ExpansionTile(
+                  title: Row(
+                    children: [
+                      Text(
+                        '${group.count} duplicates',
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        '(${_formatSize(group.totalSize)})',
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.primary.withOpacity(0.7),
+                        ),
+                      ),
+                      const Spacer(),
+                      IconButton(
+                        icon: const Icon(Icons.delete_outline),
+                        tooltip: 'Delete group duplicates',
+                        onPressed: onDelete,
+                      ),
+                    ],
+                  ),
+                  subtitle: Text(
+                    'First found: ${group.files.first.name}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  leading: Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: Theme.of(context).colorScheme.error.withOpacity(0.1),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Text(
+                      '${index + 1}',
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.error,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  children: group.files
+                      .map((file) => _buildFileListTile(context, file))
+                      .toList(),
                 ),
               ),
-            ],
-          ),
-          subtitle: Text(
-            'First found: ${group.files.first.name}',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-          leading: Container(
-            padding: const EdgeInsets.all(8),
-            decoration: BoxDecoration(
-              color: Theme.of(context).colorScheme.error.withOpacity(0.1),
-              shape: BoxShape.circle,
-            ),
-            child: Text(
-              '${index + 1}',
-              style: TextStyle(
-                color: Theme.of(context).colorScheme.error,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-          ),
-          children:
-              group.files
-                  .map((file) => _buildFileListTile(context, file))
-                  .toList(),
-        ),
-      ),
-    );
+            )
+          : const SizedBox.shrink(),
+    ),
+  );
+}
+
+
+// function for deleteGroupDuplicates is used onPressed
+Future<void> _deleteGroupDuplicates(
+  BuildContext context,
+  DuplicateGroup group,
+  void Function() onGroupRemoved,
+) async {
+  final dupBin = await _getDupBinDirectory();
+
+  if (group.files.length <= 1) return;
+
+  // Map each file to its last modified date (safely)
+  final fileDateMap = <FileInfo, DateTime>{};
+  for (final f in group.files) {
+    try {
+      final file = File(f.path);
+      if (await file.exists()) {
+        fileDateMap[f] = await file.lastModified();
+      }
+    } catch (e) {
+      continue; // Skip unreadable or missing files
+    }
   }
+
+  if (fileDateMap.isEmpty) return;
+
+  // Identify the oldest file to keep
+  final oldest = fileDateMap.entries.reduce((a, b) => a.value.isBefore(b.value) ? a : b).key;
+
+  for (final f in group.files) {
+    if (f.path == oldest.path) continue;
+
+    final file = File(f.path);
+    if (await file.exists()) {
+      final fileName = file.path.split(Platform.pathSeparator).last;
+      final newPath = '${dupBin.path}${Platform.pathSeparator}$fileName';
+
+      try {
+        await file.rename(newPath);
+      } catch (e) {
+        // fallback to copy + delete if rename fails
+        await file.copy(newPath);
+        await file.delete();
+      }
+    }
+  }
+
+  // Trigger vanish animation callback
+  onGroupRemoved();
+
+  if (context.mounted) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Group duplicates moved to Documents/dupbin')),
+    );
+
+    // Do not rescan here! Just remove from UI:
+    context.read<ScanBloc>().add(RemoveDuplicateGroupEvent(group));
+  }
+}
+
+
 
   Widget _buildFileListTile(BuildContext context, FileInfo file) {
     return ListTile(
@@ -1288,6 +1460,8 @@ Future<Directory> _getDupBinDirectory() async {
     );
   }
 
+
+// page lastly shows when no duplicate is found
   Widget _buildNoDuplicatesFoundMessage(BuildContext context, ScanState state) {
   if (state.status == ScanStatus.completed && state.duplicateGroups.isEmpty) {
     return SliverFillRemaining(
