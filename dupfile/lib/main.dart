@@ -332,11 +332,17 @@ class CancelScanEvent extends ScanEvent {}
 
 
 class SelectDirectoryEvent extends ScanEvent {
+  final String? directory;
   final bool useQuickScan;
   final List<String> extensions;
 
-  SelectDirectoryEvent({this.useQuickScan = true, this.extensions = const []});
+  SelectDirectoryEvent({
+    this.directory,
+    this.useQuickScan = false,
+    this.extensions = const [],
+  });
 }
+
 
 class UpdateProgressEvent extends ScanEvent {
   final int processed;
@@ -368,9 +374,12 @@ class UpdateExtensionsEvent extends ScanEvent {
   UpdateExtensionsEvent(this.extensions);
 }
 
+class RescanDirectoryEvent extends ScanEvent {}
+
 class ScanBloc extends Bloc<ScanEvent, ScanState> {
   final FileCheckerRepository repository;
   bool _isCancelled = false;
+  String? currentDirectory;
 
   ScanBloc(this.repository) : super(ScanState()) {
     on<SelectDirectoryEvent>(_onSelectDirectory);
@@ -379,22 +388,24 @@ class ScanBloc extends Bloc<ScanEvent, ScanState> {
     on<ToggleQuickScanEvent>(_onToggleQuickScan);
     on<UpdateExtensionsEvent>(_onUpdateExtensions);
     on<CancelScanEvent>(_onCancelScan);
+    on<RescanDirectoryEvent>(_onRescanDirectory);
   }
 
   void _onCancelScan(CancelScanEvent event, Emitter<ScanState> emit) {
-  _isCancelled = true;
-  emit(state.copyWith(status: ScanStatus.initial)); // <-- back to idle
-}
+    _isCancelled = true;
+    emit(state.copyWith(status: ScanStatus.initial));
+  }
 
   Future<void> _onSelectDirectory(
     SelectDirectoryEvent event,
     Emitter<ScanState> emit,
   ) async {
-
     _isCancelled = false;
 
-    final directory = await FilePicker.platform.getDirectoryPath();
+    final directory = event.directory ?? await FilePicker.platform.getDirectoryPath();
     if (directory == null) return;
+
+    currentDirectory = directory;
 
     emit(
       state.copyWith(
@@ -422,39 +433,37 @@ class ScanBloc extends Bloc<ScanEvent, ScanState> {
 
       emit(state.copyWith(totalFiles: files.length));
 
-      // Quick scan mode - first group by size
       if (state.useQuickScan && files.length > 100) {
         final sizeGroups = await repository.findDuplicatesBySize(files);
 
         int processed = 0;
         int duplicateCount = 0;
 
-        // Process only potential duplicates (same size files)
         for (final entry in sizeGroups.entries) {
           final sameSize = entry.value;
 
           for (int i = 0; i < sameSize.length; i++) {
-            if (_isCancelled || isClosed) return; {
-              final fileInfo = sameSize[i];
+            if (_isCancelled || isClosed) return;
 
-              emit(
-                state.copyWith(
-                  processedFiles: processed + 1,
-                  currentFile: fileInfo.name,
-                  progress: (processed + 1) / files.length,
-                ),
-              );
+            final fileInfo = sameSize[i];
 
-              final result = await Isolate.run(
-                () => FileWorker.computeChecksum({'path': fileInfo.path}),
-              );
+            emit(
+              state.copyWith(
+                processedFiles: processed + 1,
+                currentFile: fileInfo.name,
+                progress: (processed + 1) / files.length,
+              ),
+            );
 
-              if (!result.startsWith('error:')) {
-                await repository.insertFile(result, fileInfo);
-              }
+            final result = await Isolate.run(
+              () => FileWorker.computeChecksum({'path': fileInfo.path}),
+            );
 
-              processed++;
+            if (!result.startsWith('error:')) {
+              await repository.insertFile(result, fileInfo);
             }
+
+            processed++;
           }
         }
 
@@ -465,16 +474,14 @@ class ScanBloc extends Bloc<ScanEvent, ScanState> {
         );
 
         if (!_isCancelled && !isClosed) {
-  add(CompleteScanEvent(duplicates));
-}
-
+          add(CompleteScanEvent(duplicates));
+        }
       } else {
-        // Standard full scan
         int processed = 0;
         int duplicateCount = 0;
 
         for (final file in files) {
-          if (_isCancelled || isClosed) return; 
+          if (_isCancelled || isClosed) return;
 
           final fileInfo = FileInfo.fromFile(file);
 
@@ -493,7 +500,6 @@ class ScanBloc extends Bloc<ScanEvent, ScanState> {
           if (!result.startsWith('error:')) {
             await repository.insertFile(result, fileInfo);
 
-            // Check current duplicate count periodically
             if (processed % 10 == 0 || processed == files.length - 1) {
               final duplicates = await repository.getDuplicates();
               duplicateCount = duplicates.fold(
@@ -510,8 +516,8 @@ class ScanBloc extends Bloc<ScanEvent, ScanState> {
 
         final duplicates = await repository.getDuplicates();
         if (!_isCancelled && !isClosed) {
-  add(CompleteScanEvent(duplicates));
-}
+          add(CompleteScanEvent(duplicates));
+        }
       }
     } catch (e) {
       emit(state.copyWith(status: ScanStatus.error, error: e.toString()));
@@ -547,6 +553,15 @@ class ScanBloc extends Bloc<ScanEvent, ScanState> {
     Emitter<ScanState> emit,
   ) {
     emit(state.copyWith(selectedExtensions: event.extensions));
+  }
+
+  Future<void> _onRescanDirectory(
+    RescanDirectoryEvent event,
+    Emitter<ScanState> emit,
+  ) async {
+    if (currentDirectory != null) {
+      add(SelectDirectoryEvent(directory: currentDirectory!));
+    }
   }
 }
 
@@ -1045,60 +1060,127 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
 
 
   Widget _buildResultsHeader(BuildContext context, ScanState state) {
-    if (state.duplicateGroups.isEmpty) return const SizedBox.shrink();
+  if (state.duplicateGroups.isEmpty) return const SizedBox.shrink();
 
-    final totalSize = state.duplicateGroups.fold(0, (total, group) {
-      // Count all files except one per group (as one needs to be kept)
-      return total + group.totalSize ~/ group.count * (group.count - 1);
-    });
+  final totalSize = state.duplicateGroups.fold(0, (total, group) {
+    return total + group.totalSize ~/ group.count * (group.count - 1);
+  });
 
-    return Card(
-      color: Theme.of(context).colorScheme.secondaryContainer,
-      child: Padding(
-        padding: const EdgeInsets.all(20.0),
-        child: Column(
-          children: [
-            Row(
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: Theme.of(
-                      context,
-                    ).colorScheme.secondary.withOpacity(0.2),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Icon(
-                    Icons.save_alt,
-                    color: Theme.of(context).colorScheme.secondary,
-                  ),
+  return Card(
+    color: Theme.of(context).colorScheme.secondaryContainer,
+    child: Padding(
+      padding: const EdgeInsets.all(20.0),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.secondary.withOpacity(0.2),
+                  borderRadius: BorderRadius.circular(12),
                 ),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Reclaim Space',
-                        style: Theme.of(context).textTheme.titleLarge,
-                      ),
-                      Text(
-                        'You can save up to ${_formatSize(totalSize)}',
-                        style: TextStyle(
-                          color: Theme.of(context).colorScheme.secondary,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ],
-                  ),
+                child: Icon(
+                  Icons.save_alt,
+                  color: Theme.of(context).colorScheme.secondary,
                 ),
-              ],
-            ),
-          ],
-        ),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Reclaim Space',
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
+                    Text(
+                      'You can save up to ${_formatSize(totalSize)}',
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.secondary,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              ElevatedButton.icon(
+                icon: const Icon(Icons.delete),
+                label: const Text("Delete Duplicates"),
+                onPressed: () => _deleteAllDuplicates(context, state),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Theme.of(context).colorScheme.errorContainer,
+                  foregroundColor: Theme.of(context).colorScheme.onErrorContainer,
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
-    );
+    ),
+  );
+}
+
+Future<void> _deleteAllDuplicates(BuildContext context, ScanState state) async {
+  final dupBin = await _getDupBinDirectory();
+
+  for (final group in state.duplicateGroups) {
+    if (group.files.length <= 1) continue;
+
+    // Create a map of files with their lastModified date
+    final fileDateMap = <FileInfo, DateTime>{};
+    for (final f in group.files) {
+      try {
+        fileDateMap[f] = File(f.path).lastModifiedSync();
+      } catch (e) {
+        // Skip unreadable files
+        continue;
+      }
+    }
+
+    if (fileDateMap.isEmpty) continue;
+
+    // Find the oldest file
+    final oldest = fileDateMap.entries.reduce((a, b) => a.value.isBefore(b.value) ? a : b).key;
+
+    for (final f in group.files) {
+      if (f.path == oldest.path) continue; // Skip the oldest (original)
+
+      final file = File(f.path);
+      if (await file.exists()) {
+        final fileName = file.path.split(Platform.pathSeparator).last;
+        final newPath = '${dupBin.path}${Platform.pathSeparator}$fileName';
+
+        try {
+          await file.rename(newPath);
+        } catch (e) {
+          await file.copy(newPath);
+          await file.delete();
+        }
+      }
+    }
   }
+
+  if (context.mounted) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Duplicates moved to Documents/dupbin')),
+    );
+    context.read<ScanBloc>().add(RescanDirectoryEvent());
+  }
+}
+
+
+
+Future<Directory> _getDupBinDirectory() async {
+  final docsDir = await getApplicationDocumentsDirectory();
+  final dupBinPath = '${docsDir.path}${Platform.pathSeparator}dupbin';
+  final dupBinDir = Directory(dupBinPath);
+  if (!await dupBinDir.exists()) {
+    await dupBinDir.create(recursive: true);
+  }
+  return dupBinDir;
+}
+
 
   String _formatSize(int bytes) {
     if (bytes < 1024) return '$bytes B';
