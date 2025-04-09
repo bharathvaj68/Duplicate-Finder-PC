@@ -613,7 +613,7 @@ class SplashScreen extends StatelessWidget {
                         shape: BoxShape.circle,
                       ),
                       child: Icon(
-                        Icons.file_copy,
+                        Icons.insert_drive_file,
                         size: 60,
                         color: colorScheme.primary,
                       ),
@@ -1122,21 +1122,35 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
 
   Widget _buildFileListTile(BuildContext context, FileInfo file) {
     return ListTile(
+      onTap: () async {
+        // Open the actual file
+        final uri = Uri.file(file.path);
+        try {
+          await launchUrl(uri);
+        } catch (e) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text('Could not open file: $e')));
+        }
+      },
       title: Text(file.name),
       subtitle: Text(
         '${_formatSize(file.size)} • ${file.modified.toString().split('.').first}',
       ),
-      leading: const Icon(Icons.insert_drive_file),
+      leading: const Icon(Icons.insert_drive_file), // File icon
       trailing: IconButton(
-        icon: const Icon(Icons.folder_open),
+        icon: const Icon(Icons.folder_open), // Folder icon
         onPressed: () async {
-          final uri = Uri.file(file.path);
+          // Open folder where file is located
+          final directoryUri = Uri.file(
+            file.path.replaceAll(RegExp(r'[^/\\]+$'), ''), // Remove file name
+          );
           try {
-            await launchUrl(uri);
+            await launchUrl(directoryUri);
           } catch (e) {
-            ScaffoldMessenger.of(
-              context,
-            ).showSnackBar(SnackBar(content: Text('Could not open: $e')));
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Could not open folder: $e')),
+            );
           }
         },
       ),
@@ -1144,38 +1158,8 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   }
 
   Widget _buildEmptyState(BuildContext context) {
-    return SliverFillRemaining(
-      child: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Lottie.asset(
-              'assets/empty_folders.json',
-              width: 200,
-              height: 200,
-              fit: BoxFit.contain,
-            ),
-            const SizedBox(height: 24),
-            Text(
-              'No Duplicates Found Yet',
-              style: Theme.of(context).textTheme.titleLarge,
-            ),
-            const SizedBox(height: 8),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 40),
-              child: Text(
-                'Tap the scan button to search for duplicate files in a directory',
-                textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                  color: Theme.of(
-                    context,
-                  ).colorScheme.onSurface.withOpacity(0.7),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
+    return const SliverFillRemaining(
+      child: SizedBox.shrink(), // renders nothing
     );
   }
 }
