@@ -330,7 +330,6 @@ abstract class ScanEvent {}
 
 class CancelScanEvent extends ScanEvent {}
 
-
 class SelectDirectoryEvent extends ScanEvent {
   final String? directory;
   final bool useQuickScan;
@@ -342,7 +341,6 @@ class SelectDirectoryEvent extends ScanEvent {
     this.extensions = const [],
   });
 }
-
 
 class UpdateProgressEvent extends ScanEvent {
   final int processed;
@@ -395,7 +393,6 @@ class ScanBloc extends Bloc<ScanEvent, ScanState> {
     on<CancelScanEvent>(_onCancelScan);
     on<RescanDirectoryEvent>(_onRescanDirectory);
     on<RemoveDuplicateGroupEvent>(_onRemoveDuplicateGroup);
-
   }
 
   void _onCancelScan(CancelScanEvent event, Emitter<ScanState> emit) {
@@ -404,14 +401,14 @@ class ScanBloc extends Bloc<ScanEvent, ScanState> {
   }
 
   void _onRemoveDuplicateGroup(
-  RemoveDuplicateGroupEvent event,
-  Emitter<ScanState> emit,
-) {
-  final updatedGroups = List<DuplicateGroup>.from(state.duplicateGroups)
-    ..removeWhere((g) => g == event.group);
+    RemoveDuplicateGroupEvent event,
+    Emitter<ScanState> emit,
+  ) {
+    final updatedGroups = List<DuplicateGroup>.from(state.duplicateGroups)
+      ..removeWhere((g) => g == event.group);
 
-  emit(state.copyWith(duplicateGroups: updatedGroups));
-}
+    emit(state.copyWith(duplicateGroups: updatedGroups));
+  }
 
   Future<void> _onSelectDirectory(
     SelectDirectoryEvent event,
@@ -419,7 +416,8 @@ class ScanBloc extends Bloc<ScanEvent, ScanState> {
   ) async {
     _isCancelled = false;
 
-    final directory = event.directory ?? await FilePicker.platform.getDirectoryPath();
+    final directory =
+        event.directory ?? await FilePicker.platform.getDirectoryPath();
     if (directory == null) return;
 
     currentDirectory = directory;
@@ -740,88 +738,86 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     return BlocBuilder<ScanBloc, ScanState>(
       builder: (context, state) {
         return Scaffold(
-  body: CustomScrollView(
-    slivers: [
-      _buildAppBar(context, state),
-      SliverPadding(
-        padding: const EdgeInsets.all(16.0),
-        sliver: SliverToBoxAdapter(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _buildScanButton(context, state),
-              const SizedBox(height: 16),
-              ElevatedButton.icon(
-                 onPressed: _openDupBinFolder,
-                 icon: const Icon(Icons.recycling_outlined),
-                 label: const Text('Open Recycle Bin'),
-                 style: ElevatedButton.styleFrom(
-                 backgroundColor: Theme.of(context).colorScheme.primaryContainer,
-                 foregroundColor: Theme.of(context).colorScheme.onPrimaryContainer,
-                 ),
+          body: CustomScrollView(
+            slivers: [
+              _buildAppBar(context, state),
+              SliverPadding(
+                padding: const EdgeInsets.all(16.0),
+                sliver: SliverToBoxAdapter(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _buildScanButton(context, state),
+                      const SizedBox(height: 16),
+                      ElevatedButton.icon(
+                        onPressed: _openDupBinFolder,
+                        icon: const Icon(Icons.recycling_outlined),
+                        label: const Text('Open Recycle Bin'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor:
+                              Theme.of(context).colorScheme.primaryContainer,
+                          foregroundColor:
+                              Theme.of(context).colorScheme.onPrimaryContainer,
+                        ),
+                      ),
+                      _buildScanOptions(context, state),
+                      if (_showExtensionFilter) ...[
+                        const SizedBox(height: 16),
+                        _buildExtensionFilter(context),
+                      ],
+                      const SizedBox(height: 24),
+                      if (state.status == ScanStatus.scanning)
+                        _buildScanProgress(context, state)
+                      else if (state.status == ScanStatus.completed &&
+                          state.duplicateGroups.isNotEmpty)
+                        _buildResultsHeader(context, state),
+                      const SizedBox(height: 8),
+                    ],
+                  ),
                 ),
-              _buildScanOptions(context, state),
-              if (_showExtensionFilter) ...[
-                const SizedBox(height: 16),
-                _buildExtensionFilter(context),
-              ],
-              const SizedBox(height: 24),
-              if (state.status == ScanStatus.scanning)
-                _buildScanProgress(context, state)
+              ),
+
+              // Show this only if no duplicates found
+              if (state.status == ScanStatus.completed &&
+                  state.duplicateGroups.isEmpty)
+                _buildNoDuplicatesFoundMessage(context, state)
+              // Show the results list if duplicates found
               else if (state.status == ScanStatus.completed &&
                   state.duplicateGroups.isNotEmpty)
-                _buildResultsHeader(context, state),
-                const SizedBox(height: 8),
-                
+                _buildResultsList(context, state)
+              // Show a message when app first loads
+              else if (state.status == ScanStatus.initial)
+                SliverFillRemaining(
+                  hasScrollBody: false,
+                  child: Center(
+                    child: Text("Start a scan to find duplicate files."),
+                  ),
+                ),
             ],
           ),
-        ),
-      ),
-
-      // Show this only if no duplicates found
-      if (state.status == ScanStatus.completed &&
-          state.duplicateGroups.isEmpty)
-        _buildNoDuplicatesFoundMessage(context, state)
-
-      // Show the results list if duplicates found
-      else if (state.status == ScanStatus.completed &&
-               state.duplicateGroups.isNotEmpty)
-        _buildResultsList(context, state)
-
-      // Show a message when app first loads
-      else if (state.status == ScanStatus.initial)
-        SliverFillRemaining(
-          hasScrollBody: false,
-          child: Center(
-            child: Text("Start a scan to find duplicate files."),
-          ),
-        ),
-    ],
-  ),
-);
-
+        );
       },
     );
   }
 
+  //_openDupBinFolder is used when open recycle bin button is pressed
+  Future<void> _openDupBinFolder() async {
+    final docsDir = await getApplicationDocumentsDirectory();
+    final dupBin = Directory('${docsDir.path}${Platform.pathSeparator}dupbin');
 
-//_openDupBinFolder is used when open recycle bin button is pressed
-Future<void> _openDupBinFolder() async {
-  final docsDir = await getApplicationDocumentsDirectory();
-  final dupBin = Directory('${docsDir.path}${Platform.pathSeparator}dupbin');
+    if (!await dupBin.exists()) {
+      await dupBin.create(recursive: true);
+    }
 
-  if (!await dupBin.exists()) {
-    await dupBin.create(recursive: true);
+    if (Platform.isWindows) {
+      await Process.run('explorer', [dupBin.path]);
+    } else if (Platform.isMacOS) {
+      await Process.run('open', [dupBin.path]);
+    } else if (Platform.isLinux) {
+      await Process.run('xdg-open', [dupBin.path]);
+    }
   }
 
-  if (Platform.isWindows) {
-    await Process.run('explorer', [dupBin.path]);
-  } else if (Platform.isMacOS) {
-    await Process.run('open', [dupBin.path]);
-  } else if (Platform.isLinux) {
-    await Process.run('xdg-open', [dupBin.path]);
-  }
-}
   Widget _buildAppBar(BuildContext context, ScanState state) {
     return SliverAppBar(
       expandedHeight: 120,
@@ -880,14 +876,15 @@ Future<void> _openDupBinFolder() async {
 
   Widget _buildScanButton(BuildContext context, ScanState state) {
     return ElevatedButton.icon(
-      onPressed: (state.status == ScanStatus.scanning)
-    ? null
-    : () => context.read<ScanBloc>().add(
-          SelectDirectoryEvent(
-            useQuickScan: state.useQuickScan,
-            extensions: _selectedExtensions,
-          ),
-        ),
+      onPressed:
+          (state.status == ScanStatus.scanning)
+              ? null
+              : () => context.read<ScanBloc>().add(
+                SelectDirectoryEvent(
+                  useQuickScan: state.useQuickScan,
+                  extensions: _selectedExtensions,
+                ),
+              ),
 
       icon: Icon(
         state.status == ScanStatus.scanning
@@ -910,356 +907,410 @@ Future<void> _openDupBinFolder() async {
   }
 
   Widget _buildScanOptions(BuildContext context, ScanState state) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Scan Options',
-              style: Theme.of(
-                context,
-              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 16),
-            SwitchListTile(
-              title: const Text('Quick Scan Mode'),
-              subtitle: const Text(
-                'Compares files with same size first (faster)',
-              ),
-              value: state.useQuickScan,
-              onChanged: (value) {
-                context.read<ScanBloc>().add(ToggleQuickScanEvent(value));
-              },
-              secondary: Icon(
-                Icons.speed,
-                color: Theme.of(context).colorScheme.primary,
-              ),
-            ),
-            ListTile(
-              title: const Text('File Extension Filter'),
-              subtitle: Text(
-                _selectedExtensions.isEmpty
-                    ? 'All files'
-                    : '${_selectedExtensions.length} extensions selected',
-              ),
-              leading: Icon(
-                Icons.filter_list,
-                color: Theme.of(context).colorScheme.primary,
-              ),
-              trailing: IconButton(
-                icon: Icon(
-                  _showExtensionFilter ? Icons.expand_less : Icons.expand_more,
-                ),
-                onPressed: () {
-                  setState(() {
-                    _showExtensionFilter = !_showExtensionFilter;
-                  });
-                },
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildExtensionFilter(BuildContext context) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  'File Extensions',
-                  style: Theme.of(context).textTheme.titleMedium,
-                ),
-                TextButton.icon(
-                  icon: const Icon(Icons.clear_all),
-                  label: Text(
-                    _selectedExtensions.isEmpty ? 'Select All' : 'Clear All',
+  return TweenAnimationBuilder<double>(
+    duration: const Duration(milliseconds: 500),
+    tween: Tween<double>(begin: 0, end: 1),
+    builder: (context, value, child) {
+      return Opacity(
+        opacity: value,
+        child: Transform.translate(
+          offset: Offset(0, 50 * (1 - value)),
+          child: Card(
+            elevation: 8,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+            color: Theme.of(context).cardColor.withOpacity(0.85),
+            child: Padding(
+              padding: const EdgeInsets.all(20.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Scan Options',
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.bold,
+                        ),
                   ),
-                  onPressed: () {
-                    setState(() {
-                      if (_selectedExtensions.isEmpty) {
-                        _selectedExtensions.addAll(_commonExtensions);
-                      } else {
-                        _selectedExtensions.clear();
-                      }
-                    });
-                    context.read<ScanBloc>().add(
-                      UpdateExtensionsEvent(_selectedExtensions),
-                    );
-                  },
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children:
-                  _commonExtensions.map((ext) {
-                    final selected = _selectedExtensions.contains(ext);
-                    return FilterChip(
-                      label: Text(ext),
-                      selected: selected,
-                      checkmarkColor: Theme.of(context).colorScheme.onPrimary,
-                      selectedColor: Theme.of(context).colorScheme.primary,
-                      labelStyle: TextStyle(
-                        color:
-                            selected
-                                ? Theme.of(context).colorScheme.onPrimary
-                                : null,
+                  const SizedBox(height: 16),
+                  SwitchListTile(
+                    title: const Text('Quick Scan Mode'),
+                    subtitle: const Text('Compares files with same size first (faster)'),
+                    value: state.useQuickScan,
+                    onChanged: (value) {
+                      context.read<ScanBloc>().add(ToggleQuickScanEvent(value));
+                    },
+                    secondary: Icon(
+                      Icons.speed,
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
+                  ),
+                  ListTile(
+                    title: const Text('File Extension Filter'),
+                    subtitle: Text(
+                      _selectedExtensions.isEmpty
+                          ? 'All files'
+                          : '${_selectedExtensions.length} extensions selected',
+                    ),
+                    leading: Icon(
+                      Icons.filter_list,
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
+                    trailing: IconButton(
+                      icon: AnimatedRotation(
+                        turns: _showExtensionFilter ? 0.5 : 0,
+                        duration: const Duration(milliseconds: 300),
+                        child: Icon(
+                          _showExtensionFilter ? Icons.expand_less : Icons.expand_more,
+                        ),
                       ),
-                      onSelected: (value) {
+                      onPressed: () {
                         setState(() {
-                          if (value) {
-                            _selectedExtensions.add(ext);
-                          } else {
-                            _selectedExtensions.remove(ext);
-                          }
+                          _showExtensionFilter = !_showExtensionFilter;
                         });
-                        context.read<ScanBloc>().add(
-                          UpdateExtensionsEvent(_selectedExtensions),
-                        );
                       },
-                    );
-                  }).toList(),
+                    ),
+                  ),
+                ],
+              ),
             ),
-          ],
+          ),
         ),
-      ),
-    );
-  }
-
-  Widget _buildScanProgress(BuildContext context, ScanState state) {
-  return Card(
-    child: Padding(
-      padding: const EdgeInsets.all(24.0),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          LinearProgressIndicator(
-            value: state.progress,
-            minHeight: 10,
-            borderRadius: BorderRadius.circular(8),
-          ),
-          const SizedBox(height: 24),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Column(
-                children: [
-                  Text(
-                    '${state.processedFiles}/${state.totalFiles}',
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                          fontWeight: FontWeight.bold,
-                        ),
-                  ),
-                  const Text('Files Scanned'),
-                ],
-              ),
-              const SizedBox(width: 40),
-              Column(
-                children: [
-                  Text(
-                    '${state.duplicateCount}',
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                          fontWeight: FontWeight.bold,
-                          color: Theme.of(context).colorScheme.error,
-                        ),
-                  ),
-                  const Text('Duplicates Found'),
-                ],
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          Text(
-            'Current file: ${state.currentFile}',
-            textAlign: TextAlign.center,
-            style: Theme.of(context).textTheme.bodySmall,
-            overflow: TextOverflow.ellipsis,
-          ),
-          const SizedBox(height: 24),
-          TextButton.icon(
-            icon: const Icon(Icons.cancel),
-            label: const Text("Cancel Scan"),
-            style: TextButton.styleFrom(
-              foregroundColor: Theme.of(context).colorScheme.error,
-            ),
-            onPressed: () {
-              context.read<ScanBloc>().add(CancelScanEvent());
-            },
-          ),
-        ],
-      ),
-    ),
+      );
+    },
   );
 }
 
-
-// it is the page shows after duplicates found
-  Widget _buildResultsHeader(BuildContext context, ScanState state) {
-  if (state.duplicateGroups.isEmpty) return const SizedBox.shrink();
-
-  final totalSize = state.duplicateGroups.fold(0, (total, group) {
-  if (group.files.length <= 1) return total;
-
-  final sortedFiles = List.of(group.files);
-  sortedFiles.sort((a, b) {
-    final aModified = File(a.path).lastModifiedSync();
-    final bModified = File(b.path).lastModifiedSync();
-    return aModified.compareTo(bModified);
-  });
-
-  // Keep the oldest, sum the rest
-  final duplicatesSize = sortedFiles.skip(1).fold<int>(0, (sum, file) {
-    return sum + File(file.path).lengthSync();
-  });
-
-  return total + duplicatesSize;
-});
-
-  return Card(
-    color: Theme.of(context).colorScheme.secondaryContainer,
-    child: Padding(
-      padding: const EdgeInsets.all(20.0),
-      child: Column(
-        children: [
-          Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Theme.of(context).colorScheme.secondary.withOpacity(0.2),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Icon(
-                  Icons.save_alt,
-                  color: Theme.of(context).colorScheme.secondary,
-                ),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Reclaim Space',
-                      style: Theme.of(context).textTheme.titleLarge,
-                    ),
-                    Text(
-                      'You can save up to ${_formatSize(totalSize)}',
-                      style: TextStyle(
-                        color: Theme.of(context).colorScheme.secondary,
-                        fontWeight: FontWeight.bold,
+  Widget _buildExtensionFilter(BuildContext context) {
+  return AnimatedContainer(
+    duration: const Duration(milliseconds: 400),
+    curve: Curves.easeOut,
+    padding: _showExtensionFilter ? const EdgeInsets.all(16) : EdgeInsets.zero,
+    height: _showExtensionFilter ? null : 0,
+    child: _showExtensionFilter
+        ? Card(
+            elevation: 8,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+            child: Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        'File Extensions',
+                        style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
                       ),
+                      TextButton.icon(
+                        icon: const Icon(Icons.clear_all),
+                        label: Text(_selectedExtensions.isEmpty ? 'Select All' : 'Clear All'),
+                        onPressed: () {
+                          setState(() {
+                            if (_selectedExtensions.isEmpty) {
+                              _selectedExtensions.addAll(_commonExtensions);
+                            } else {
+                              _selectedExtensions.clear();
+                            }
+                          });
+                          context.read<ScanBloc>().add(UpdateExtensionsEvent(_selectedExtensions));
+                        },
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: _commonExtensions.map((ext) {
+                      final selected = _selectedExtensions.contains(ext);
+                      return TweenAnimationBuilder<double>(
+                        duration: const Duration(milliseconds: 300),
+                        tween: Tween<double>(begin: selected ? 0.8 : 1.0, end: selected ? 1.0 : 0.8),
+                        builder: (context, scale, child) {
+                          return Transform.scale(
+                            scale: scale,
+                            child: FilterChip(
+                              label: Text(ext),
+                              selected: selected,
+                              checkmarkColor: Theme.of(context).colorScheme.onPrimary,
+                              selectedColor: Theme.of(context).colorScheme.primary,
+                              labelStyle: TextStyle(
+                                color: selected ? Theme.of(context).colorScheme.onPrimary : Theme.of(context).colorScheme.onBackground,
+                              ),
+                              onSelected: (value) {
+                                setState(() {
+                                  if (value) {
+                                    _selectedExtensions.add(ext);
+                                  } else {
+                                    _selectedExtensions.remove(ext);
+                                  }
+                                });
+                                context.read<ScanBloc>().add(UpdateExtensionsEvent(_selectedExtensions));
+                              },
+                            ),
+                          );
+                        },
+                      );
+                    }).toList(),
+                  ),
+                ],
+              ),
+            ),
+          )
+        : const SizedBox.shrink(),
+  );
+}
+
+  Widget _buildScanProgress(BuildContext context, ScanState state) {
+  return TweenAnimationBuilder<double>(
+    duration: const Duration(milliseconds: 500),
+    tween: Tween<double>(begin: 0, end: 1),
+    builder: (context, value, child) {
+      return Opacity(
+        opacity: value,
+        child: Card(
+          elevation: 8,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          child: Padding(
+            padding: const EdgeInsets.all(24.0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                LinearProgressIndicator(
+                  value: state.progress,
+                  minHeight: 10,
+                  backgroundColor: Theme.of(context).colorScheme.background,
+                  valueColor: AlwaysStoppedAnimation(Theme.of(context).colorScheme.primary),
+                ),
+                const SizedBox(height: 24),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Column(
+                      children: [
+                        Text(
+                          '${state.processedFiles}/${state.totalFiles}',
+                          style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
+                        ),
+                        const Text('Files Scanned'),
+                      ],
+                    ),
+                    const SizedBox(width: 40),
+                    Column(
+                      children: [
+                        Text(
+                          '${state.duplicateCount}',
+                          style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                                fontWeight: FontWeight.bold,
+                                color: Theme.of(context).colorScheme.error,
+                              ),
+                        ),
+                        const Text('Duplicates Found'),
+                      ],
                     ),
                   ],
                 ),
-              ),
-              ElevatedButton.icon(
-                icon: const Icon(Icons.delete),
-                label: const Text("Delete Duplicates"),
-                onPressed: () => _deleteAllDuplicates(context, state), //func in ln 1164
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Theme.of(context).colorScheme.errorContainer,
-                  foregroundColor: Theme.of(context).colorScheme.onErrorContainer,
+                const SizedBox(height: 16),
+                Text(
+                  'Current file: ${state.currentFile}',
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.bodySmall,
+                  overflow: TextOverflow.ellipsis,
                 ),
-              ),
-            ],
+                const SizedBox(height: 24),
+                AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 400),
+                  child: state.progress < 1.0
+                      ? TextButton.icon(
+                          key: const ValueKey('cancel'),
+                          icon: const Icon(Icons.cancel),
+                          label: const Text("Cancel Scan"),
+                          style: TextButton.styleFrom(
+                            foregroundColor: Theme.of(context).colorScheme.error,
+                          ),
+                          onPressed: () {
+                            context.read<ScanBloc>().add(CancelScanEvent());
+                          },
+                        )
+                      : const SizedBox.shrink(),
+                )
+              ],
+            ),
           ),
-        ],
-      ),
-    ),
+        ),
+      );
+    },
   );
 }
 
-// deleteAllDuplicates function to be used onPressed
-Future<void> _deleteAllDuplicates(BuildContext context, ScanState state) async {
-  final dupBin = await _getDupBinDirectory();
+  // it is the page shows after duplicates found
+  Widget _buildResultsHeader(BuildContext context, ScanState state) {
+    if (state.duplicateGroups.isEmpty) return const SizedBox.shrink();
 
-  for (final group in state.duplicateGroups) {
-    if (group.files.length <= 1) continue;
+    final totalSize = state.duplicateGroups.fold(0, (total, group) {
+      if (group.files.length <= 1) return total;
 
-    // Create a map of files with their lastModified date
-    final fileDateMap = <FileInfo, DateTime>{};
-    for (final f in group.files) {
-      try {
-        fileDateMap[f] = File(f.path).lastModifiedSync();
-      } catch (e) {
-        // Skip unreadable files
-        continue;
-      }
-    }
+      final sortedFiles = List.of(group.files);
+      sortedFiles.sort((a, b) {
+        final aModified = File(a.path).lastModifiedSync();
+        final bModified = File(b.path).lastModifiedSync();
+        return aModified.compareTo(bModified);
+      });
 
-    if (fileDateMap.isEmpty) continue;
+      // Keep the oldest, sum the rest
+      final duplicatesSize = sortedFiles.skip(1).fold<int>(0, (sum, file) {
+        return sum + File(file.path).lengthSync();
+      });
 
-    // Find the oldest file
-    final oldest = fileDateMap.entries.reduce((a, b) => a.value.isBefore(b.value) ? a : b).key;
+      return total + duplicatesSize;
+    });
 
-    for (final f in group.files) {
-      if (f.path == oldest.path) continue; // Skip the oldest (original)
+    return Card(
+      color: Theme.of(context).colorScheme.secondaryContainer,
+      child: Padding(
+        padding: const EdgeInsets.all(20.0),
+        child: Column(
+          children: [
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Theme.of(
+                      context,
+                    ).colorScheme.secondary.withOpacity(0.2),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Icon(
+                    Icons.save_alt,
+                    color: Theme.of(context).colorScheme.secondary,
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Reclaim Space',
+                        style: Theme.of(context).textTheme.titleLarge,
+                      ),
+                      Text(
+                        'You can save up to ${_formatSize(totalSize)}',
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.secondary,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                ElevatedButton.icon(
+                  icon: const Icon(Icons.delete),
+                  label: const Text("Delete Duplicates"),
+                  onPressed:
+                      () => _deleteAllDuplicates(
+                        context,
+                        state,
+                      ), //func in ln 1164
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor:
+                        Theme.of(context).colorScheme.errorContainer,
+                    foregroundColor:
+                        Theme.of(context).colorScheme.onErrorContainer,
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
-      final file = File(f.path);
-      if (await file.exists()) {
-        final fileName = file.path.split(Platform.pathSeparator).last;
-        final newPath = '${dupBin.path}${Platform.pathSeparator}$fileName';
+  // deleteAllDuplicates function to be used onPressed
+  Future<void> _deleteAllDuplicates(
+    BuildContext context,
+    ScanState state,
+  ) async {
+    final dupBin = await _getDupBinDirectory();
 
+    for (final group in state.duplicateGroups) {
+      if (group.files.length <= 1) continue;
+
+      // Create a map of files with their lastModified date
+      final fileDateMap = <FileInfo, DateTime>{};
+      for (final f in group.files) {
         try {
-          await file.rename(newPath);
+          fileDateMap[f] = File(f.path).lastModifiedSync();
         } catch (e) {
-          await file.copy(newPath);
-          await file.delete();
+          // Skip unreadable files
+          continue;
+        }
+      }
+
+      if (fileDateMap.isEmpty) continue;
+
+      // Find the oldest file
+      final oldest =
+          fileDateMap.entries
+              .reduce((a, b) => a.value.isBefore(b.value) ? a : b)
+              .key;
+
+      for (final f in group.files) {
+        if (f.path == oldest.path) continue; // Skip the oldest (original)
+
+        final file = File(f.path);
+        if (await file.exists()) {
+          final fileName = file.path.split(Platform.pathSeparator).last;
+          final newPath = '${dupBin.path}${Platform.pathSeparator}$fileName';
+
+          try {
+            await file.rename(newPath);
+          } catch (e) {
+            await file.copy(newPath);
+            await file.delete();
+          }
         }
       }
     }
+
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Duplicates moved to Documents/dupbin'),
+        ), // alert bar when all dups are deleted
+      );
+      context.read<ScanBloc>().add(RescanDirectoryEvent());
+    }
   }
 
-  if (context.mounted) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Duplicates moved to Documents/dupbin')), // alert bar when all dups are deleted
-    );
-    context.read<ScanBloc>().add(RescanDirectoryEvent());
+  Future<Directory> _getDupBinDirectory() async {
+    final docsDir = await getApplicationDocumentsDirectory();
+    final dupBinPath = '${docsDir.path}${Platform.pathSeparator}dupbin';
+    final dupBinDir = Directory(dupBinPath);
+    if (!await dupBinDir.exists()) {
+      await dupBinDir.create(recursive: true);
+    }
+    return dupBinDir;
   }
-}
-
-
-
-Future<Directory> _getDupBinDirectory() async {
-  final docsDir = await getApplicationDocumentsDirectory();
-  final dupBinPath = '${docsDir.path}${Platform.pathSeparator}dupbin';
-  final dupBinDir = Directory(dupBinPath);
-  if (!await dupBinDir.exists()) {
-    await dupBinDir.create(recursive: true);
-  }
-  return dupBinDir;
-}
-
 
   String _formatSize(int bytes) {
     if (bytes < 1024) return '$bytes B';
     if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
-    if (bytes < 1024 * 1024 * 1024)
+    if (bytes < 1024 * 1024 * 1024) {
       return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    }
     return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
   }
 
   Widget _buildResultsList(BuildContext context, ScanState state) {
-  for (var group in state.duplicateGroups) {
-    _groupVisibility.putIfAbsent(group, () => true);
-  }
+    for (var group in state.duplicateGroups) {
+      _groupVisibility.putIfAbsent(group, () => true);
+    }
 
-  return SliverList(
-    delegate: SliverChildBuilderDelegate(
-      (context, index) {
+    return SliverList(
+      delegate: SliverChildBuilderDelegate((context, index) {
         final group = state.duplicateGroups[index];
         return _buildDuplicateGroupCard(
           context,
@@ -1273,155 +1324,158 @@ Future<Directory> _getDupBinDirectory() async {
 
             await Future.delayed(const Duration(milliseconds: 400));
 
-            await _deleteGroupDuplicates(
-              context,
-              group,
-              () {
-                context.read<ScanBloc>().add(RemoveDuplicateGroupEvent(group));
-              },
-            );
+            await _deleteGroupDuplicates(context, group, () {
+              context.read<ScanBloc>().add(RemoveDuplicateGroupEvent(group));
+            });
           },
         );
-      },
-      childCount: state.duplicateGroups.length,
-    ),
-  );
-}
+      }, childCount: state.duplicateGroups.length),
+    );
+  }
 
-
-
-//separate group duplicate cards
- Widget _buildDuplicateGroupCard(
-  BuildContext context,
-  DuplicateGroup group,
-  int index,
-  bool isVisible,
-  VoidCallback onDelete,
-) {
-  return AnimatedOpacity(
-    opacity: isVisible ? 1.0 : 0.0,
-    duration: const Duration(milliseconds: 400),
-    curve: Curves.easeOut,
-    child: AnimatedSize(
+  //separate group duplicate cards
+  Widget _buildDuplicateGroupCard(
+    BuildContext context,
+    DuplicateGroup group,
+    int index,
+    bool isVisible,
+    VoidCallback onDelete,
+  ) {
+    return AnimatedOpacity(
+      opacity: isVisible ? 1.0 : 0.0,
       duration: const Duration(milliseconds: 400),
       curve: Curves.easeOut,
-      child: isVisible
-          ? Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              child: Card(
-                child: ExpansionTile(
-                  title: Row(
-                    children: [
-                      Text(
-                        '${group.count} duplicates',
-                        style: const TextStyle(fontWeight: FontWeight.bold),
+      child: AnimatedSize(
+        duration: const Duration(milliseconds: 400),
+        curve: Curves.easeOut,
+        child:
+            isVisible
+                ? Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 8,
+                  ),
+                  child: Card(
+                    child: ExpansionTile(
+                      title: Row(
+                        children: [
+                          Text(
+                            '${group.count} duplicates',
+                            style: const TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            '(${_formatSize(group.totalSize)})',
+                            style: TextStyle(
+                              color: Theme.of(
+                                context,
+                              ).colorScheme.primary.withOpacity(0.7),
+                            ),
+                          ),
+                          const Spacer(),
+                          IconButton(
+                            icon: const Icon(Icons.delete_outline),
+                            tooltip: 'Delete group duplicates',
+                            onPressed: onDelete,
+                          ),
+                        ],
                       ),
-                      const SizedBox(width: 8),
-                      Text(
-                        '(${_formatSize(group.totalSize)})',
-                        style: TextStyle(
-                          color: Theme.of(context).colorScheme.primary.withOpacity(0.7),
+                      subtitle: Text(
+                        'First found: ${group.files.first.name}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      leading: Container(
+                        padding: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          color: Theme.of(
+                            context,
+                          ).colorScheme.error.withOpacity(0.1),
+                          shape: BoxShape.circle,
+                        ),
+                        child: Text(
+                          '${index + 1}',
+                          style: TextStyle(
+                            color: Theme.of(context).colorScheme.error,
+                            fontWeight: FontWeight.bold,
+                          ),
                         ),
                       ),
-                      const Spacer(),
-                      IconButton(
-                        icon: const Icon(Icons.delete_outline),
-                        tooltip: 'Delete group duplicates',
-                        onPressed: onDelete,
-                      ),
-                    ],
-                  ),
-                  subtitle: Text(
-                    'First found: ${group.files.first.name}',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  leading: Container(
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: Theme.of(context).colorScheme.error.withOpacity(0.1),
-                      shape: BoxShape.circle,
-                    ),
-                    child: Text(
-                      '${index + 1}',
-                      style: TextStyle(
-                        color: Theme.of(context).colorScheme.error,
-                        fontWeight: FontWeight.bold,
-                      ),
+                      children:
+                          group.files
+                              .map((file) => _buildFileListTile(context, file))
+                              .toList(),
                     ),
                   ),
-                  children: group.files
-                      .map((file) => _buildFileListTile(context, file))
-                      .toList(),
-                ),
-              ),
-            )
-          : const SizedBox.shrink(),
-    ),
-  );
-}
+                )
+                : const SizedBox.shrink(),
+      ),
+    );
+  }
 
+  // function for deleteGroupDuplicates is used onPressed
+  Future<void> _deleteGroupDuplicates(
+    BuildContext context,
+    DuplicateGroup group,
+    void Function() onGroupRemoved,
+  ) async {
+    final dupBin = await _getDupBinDirectory();
 
-// function for deleteGroupDuplicates is used onPressed
-Future<void> _deleteGroupDuplicates(
-  BuildContext context,
-  DuplicateGroup group,
-  void Function() onGroupRemoved,
-) async {
-  final dupBin = await _getDupBinDirectory();
+    if (group.files.length <= 1) return;
 
-  if (group.files.length <= 1) return;
+    // Map each file to its last modified date (safely)
+    final fileDateMap = <FileInfo, DateTime>{};
+    for (final f in group.files) {
+      try {
+        final file = File(f.path);
+        if (await file.exists()) {
+          fileDateMap[f] = await file.lastModified();
+        }
+      } catch (e) {
+        continue; // Skip unreadable or missing files
+      }
+    }
 
-  // Map each file to its last modified date (safely)
-  final fileDateMap = <FileInfo, DateTime>{};
-  for (final f in group.files) {
-    try {
+    if (fileDateMap.isEmpty) return;
+
+    // Identify the oldest file to keep
+    final oldest =
+        fileDateMap.entries
+            .reduce((a, b) => a.value.isBefore(b.value) ? a : b)
+            .key;
+
+    for (final f in group.files) {
+      if (f.path == oldest.path) continue;
+
       final file = File(f.path);
       if (await file.exists()) {
-        fileDateMap[f] = await file.lastModified();
-      }
-    } catch (e) {
-      continue; // Skip unreadable or missing files
-    }
-  }
+        final fileName = file.path.split(Platform.pathSeparator).last;
+        final newPath = '${dupBin.path}${Platform.pathSeparator}$fileName';
 
-  if (fileDateMap.isEmpty) return;
-
-  // Identify the oldest file to keep
-  final oldest = fileDateMap.entries.reduce((a, b) => a.value.isBefore(b.value) ? a : b).key;
-
-  for (final f in group.files) {
-    if (f.path == oldest.path) continue;
-
-    final file = File(f.path);
-    if (await file.exists()) {
-      final fileName = file.path.split(Platform.pathSeparator).last;
-      final newPath = '${dupBin.path}${Platform.pathSeparator}$fileName';
-
-      try {
-        await file.rename(newPath);
-      } catch (e) {
-        // fallback to copy + delete if rename fails
-        await file.copy(newPath);
-        await file.delete();
+        try {
+          await file.rename(newPath);
+        } catch (e) {
+          // fallback to copy + delete if rename fails
+          await file.copy(newPath);
+          await file.delete();
+        }
       }
     }
+
+    // Trigger vanish animation callback
+    onGroupRemoved();
+
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Group duplicates moved to Documents/dupbin'),
+        ),
+      );
+
+      // Do not rescan here! Just remove from UI:
+      context.read<ScanBloc>().add(RemoveDuplicateGroupEvent(group));
+    }
   }
-
-  // Trigger vanish animation callback
-  onGroupRemoved();
-
-  if (context.mounted) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Group duplicates moved to Documents/dupbin')),
-    );
-
-    // Do not rescan here! Just remove from UI:
-    context.read<ScanBloc>().add(RemoveDuplicateGroupEvent(group));
-  }
-}
-
-
 
   Widget _buildFileListTile(BuildContext context, FileInfo file) {
     return ListTile(
@@ -1460,29 +1514,30 @@ Future<void> _deleteGroupDuplicates(
     );
   }
 
-
-// page lastly shows when no duplicate is found
+  // page lastly shows when no duplicate is found
   Widget _buildNoDuplicatesFoundMessage(BuildContext context, ScanState state) {
-  if (state.status == ScanStatus.completed && state.duplicateGroups.isEmpty) {
-    return SliverFillRemaining(
-      hasScrollBody: false,
-      child: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.check_circle_outline, size: 64, color: Colors.green),
-            const SizedBox(height: 16),
-            Text(
-              'No duplicate files found!',
-              style: Theme.of(context).textTheme.titleMedium,
-              textAlign: TextAlign.center,
-            ),
-          ],
+    if (state.status == ScanStatus.completed && state.duplicateGroups.isEmpty) {
+      return SliverFillRemaining(
+        hasScrollBody: false,
+        child: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.check_circle_outline, size: 64, color: Colors.green),
+              const SizedBox(height: 16),
+              Text(
+                'No duplicate files found!',
+                style: Theme.of(context).textTheme.titleMedium,
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
         ),
-      ),
-    );
-  }
+      );
+    }
 
-  return const SliverToBoxAdapter(child: SizedBox.shrink()); // Renders nothing
-}
+    return const SliverToBoxAdapter(
+      child: SizedBox.shrink(),
+    ); // Renders nothing
+  }
 }
