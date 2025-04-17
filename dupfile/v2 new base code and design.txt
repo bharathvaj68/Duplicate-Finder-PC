@@ -11,8 +11,6 @@ import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:lottie/lottie.dart';
-import 'package:open_filex/open_filex.dart';
-
 
 void main() {
   sqfliteFfiInit();
@@ -334,17 +332,11 @@ class CancelScanEvent extends ScanEvent {}
 
 
 class SelectDirectoryEvent extends ScanEvent {
-  final String? directory;
   final bool useQuickScan;
   final List<String> extensions;
 
-  SelectDirectoryEvent({
-    this.directory,
-    this.useQuickScan = false,
-    this.extensions = const [],
-  });
+  SelectDirectoryEvent({this.useQuickScan = true, this.extensions = const []});
 }
-
 
 class UpdateProgressEvent extends ScanEvent {
   final int processed;
@@ -376,17 +368,9 @@ class UpdateExtensionsEvent extends ScanEvent {
   UpdateExtensionsEvent(this.extensions);
 }
 
-class RescanDirectoryEvent extends ScanEvent {}
-
-class RemoveDuplicateGroupEvent extends ScanEvent {
-  final DuplicateGroup group;
-  RemoveDuplicateGroupEvent(this.group);
-}
-
 class ScanBloc extends Bloc<ScanEvent, ScanState> {
   final FileCheckerRepository repository;
   bool _isCancelled = false;
-  String? currentDirectory;
 
   ScanBloc(this.repository) : super(ScanState()) {
     on<SelectDirectoryEvent>(_onSelectDirectory);
@@ -395,36 +379,22 @@ class ScanBloc extends Bloc<ScanEvent, ScanState> {
     on<ToggleQuickScanEvent>(_onToggleQuickScan);
     on<UpdateExtensionsEvent>(_onUpdateExtensions);
     on<CancelScanEvent>(_onCancelScan);
-    on<RescanDirectoryEvent>(_onRescanDirectory);
-    on<RemoveDuplicateGroupEvent>(_onRemoveDuplicateGroup);
-
   }
 
   void _onCancelScan(CancelScanEvent event, Emitter<ScanState> emit) {
-    _isCancelled = true;
-    emit(state.copyWith(status: ScanStatus.initial));
-  }
-
-  void _onRemoveDuplicateGroup(
-  RemoveDuplicateGroupEvent event,
-  Emitter<ScanState> emit,
-) {
-  final updatedGroups = List<DuplicateGroup>.from(state.duplicateGroups)
-    ..removeWhere((g) => g == event.group);
-
-  emit(state.copyWith(duplicateGroups: updatedGroups));
+  _isCancelled = true;
+  emit(state.copyWith(status: ScanStatus.initial)); // <-- back to idle
 }
 
   Future<void> _onSelectDirectory(
     SelectDirectoryEvent event,
     Emitter<ScanState> emit,
   ) async {
+
     _isCancelled = false;
 
-    final directory = event.directory ?? await FilePicker.platform.getDirectoryPath();
+    final directory = await FilePicker.platform.getDirectoryPath();
     if (directory == null) return;
-
-    currentDirectory = directory;
 
     emit(
       state.copyWith(
@@ -452,37 +422,39 @@ class ScanBloc extends Bloc<ScanEvent, ScanState> {
 
       emit(state.copyWith(totalFiles: files.length));
 
+      // Quick scan mode - first group by size
       if (state.useQuickScan && files.length > 100) {
         final sizeGroups = await repository.findDuplicatesBySize(files);
 
         int processed = 0;
         int duplicateCount = 0;
 
+        // Process only potential duplicates (same size files)
         for (final entry in sizeGroups.entries) {
           final sameSize = entry.value;
 
           for (int i = 0; i < sameSize.length; i++) {
-            if (_isCancelled || isClosed) return;
+            if (_isCancelled || isClosed) return; {
+              final fileInfo = sameSize[i];
 
-            final fileInfo = sameSize[i];
+              emit(
+                state.copyWith(
+                  processedFiles: processed + 1,
+                  currentFile: fileInfo.name,
+                  progress: (processed + 1) / files.length,
+                ),
+              );
 
-            emit(
-              state.copyWith(
-                processedFiles: processed + 1,
-                currentFile: fileInfo.name,
-                progress: (processed + 1) / files.length,
-              ),
-            );
+              final result = await Isolate.run(
+                () => FileWorker.computeChecksum({'path': fileInfo.path}),
+              );
 
-            final result = await Isolate.run(
-              () => FileWorker.computeChecksum({'path': fileInfo.path}),
-            );
+              if (!result.startsWith('error:')) {
+                await repository.insertFile(result, fileInfo);
+              }
 
-            if (!result.startsWith('error:')) {
-              await repository.insertFile(result, fileInfo);
+              processed++;
             }
-
-            processed++;
           }
         }
 
@@ -493,14 +465,16 @@ class ScanBloc extends Bloc<ScanEvent, ScanState> {
         );
 
         if (!_isCancelled && !isClosed) {
-          add(CompleteScanEvent(duplicates));
-        }
+  add(CompleteScanEvent(duplicates));
+}
+
       } else {
+        // Standard full scan
         int processed = 0;
         int duplicateCount = 0;
 
         for (final file in files) {
-          if (_isCancelled || isClosed) return;
+          if (_isCancelled || isClosed) return; 
 
           final fileInfo = FileInfo.fromFile(file);
 
@@ -519,6 +493,7 @@ class ScanBloc extends Bloc<ScanEvent, ScanState> {
           if (!result.startsWith('error:')) {
             await repository.insertFile(result, fileInfo);
 
+            // Check current duplicate count periodically
             if (processed % 10 == 0 || processed == files.length - 1) {
               final duplicates = await repository.getDuplicates();
               duplicateCount = duplicates.fold(
@@ -535,8 +510,8 @@ class ScanBloc extends Bloc<ScanEvent, ScanState> {
 
         final duplicates = await repository.getDuplicates();
         if (!_isCancelled && !isClosed) {
-          add(CompleteScanEvent(duplicates));
-        }
+  add(CompleteScanEvent(duplicates));
+}
       }
     } catch (e) {
       emit(state.copyWith(status: ScanStatus.error, error: e.toString()));
@@ -572,15 +547,6 @@ class ScanBloc extends Bloc<ScanEvent, ScanState> {
     Emitter<ScanState> emit,
   ) {
     emit(state.copyWith(selectedExtensions: event.extensions));
-  }
-
-  Future<void> _onRescanDirectory(
-    RescanDirectoryEvent event,
-    Emitter<ScanState> emit,
-  ) async {
-    if (currentDirectory != null) {
-      add(SelectDirectoryEvent(directory: currentDirectory!));
-    }
   }
 }
 
@@ -710,211 +676,6 @@ class SplashScreen extends StatelessWidget {
   }
 }
 
-
-//Recycle Bin page
-
-class RecycleBinPage extends StatefulWidget {
-  const RecycleBinPage({super.key});
-
-  @override
-  State<RecycleBinPage> createState() => _RecycleBinPageState();
-}
-
-class _RecycleBinPageState extends State<RecycleBinPage> {
-  Map<String, List<File>> _groupedFiles = {};
-
-  @override
-  void initState() {
-    super.initState();
-    _loadRecycledFiles();
-  }
-
-
-//Function to display common name
-String getCommonPrefix(List<String> names) {
-  if (names.isEmpty) return '';
-  String prefix = names.first;
-  for (final name in names.skip(1)) {
-    while (!name.startsWith(prefix)) {
-      if (prefix.isEmpty) return '';
-      prefix = prefix.substring(0, prefix.length - 1);
-    }
-  }
-  return prefix;
-}
-
-// to calc checksums to group duplicates
-  Future<String> _calculateChecksum(File file) async {
-    try {
-      final bytes = await file.readAsBytes();
-      return sha256.convert(bytes).toString();
-    } catch (e) {
-      return 'error';
-    }
-  }
-
-//function to load files to recyclebin
-  Future<void> _loadRecycledFiles() async {
-    try {
-      final docsDir = await getApplicationDocumentsDirectory();
-      final recycleDir = Directory('${docsDir.path}${Platform.pathSeparator}dupbin');
-
-      if (!await recycleDir.exists()) {
-        await recycleDir.create(recursive: true);
-      }
-
-      final files = recycleDir.listSync().whereType<File>().toList();
-      final Map<String, List<File>> grouped = {};
-
-      for (var file in files) {
-        final checksum = await _calculateChecksum(file);
-        if (checksum != 'error') {
-          grouped.putIfAbsent(checksum, () => []).add(file);
-        }
-      }
-
-      setState(() {
-        _groupedFiles = grouped;
-      });
-
-      for (var entry in grouped.entries) {
-        debugPrint('🔁 Group [${entry.key.substring(0, 8)}]: ${entry.value.length} files');
-      }
-    } catch (e) {
-      debugPrint('❌ Failed to load recycle bin: $e');
-    }
-  }
-
-//to open recycle bin folder from page
-  Future<void> _openRecycleBinFolder(BuildContext context) async {
-    try {
-      final docsDir = await getApplicationDocumentsDirectory();
-      final recycleDirPath = '${docsDir.path}${Platform.pathSeparator}dupbin';
-      final uri = Uri.file(recycleDirPath);
-
-      if (!await Directory(recycleDirPath).exists()) {
-        await Directory(recycleDirPath).create(recursive: true);
-      }
-
-      if (!await launchUrl(uri)) {
-        throw 'Could not open folder: $recycleDirPath';
-      }
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not open folder: $e')),
-      );
-    }
-  }
-
-
-//to restore files individually
-  Future<void> _restoreFile(BuildContext context, File file) async {
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (localCtx) => AlertDialog(
-        title: const Text('Restore File'),
-        content: Text('Restore "${file.uri.pathSegments.last}" to Downloads?'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(localCtx, false), child: const Text('Cancel')),
-          TextButton(onPressed: () => Navigator.pop(localCtx, true), child: const Text('Restore')),
-        ],
-      ),
-    );
-
-    if (confirm != true) return;
-
-    try {
-      final String home = Platform.isWindows
-          ? Platform.environment['USERPROFILE'] ?? ''
-          : Platform.environment['HOME'] ?? '';
-      final restoredDir = Directory('$home${Platform.pathSeparator}Downloads${Platform.pathSeparator}restored_dups');
-
-      if (!await restoredDir.exists()) {
-        await restoredDir.create(recursive: true);
-      }
-
-      final newPath = '${restoredDir.path}${Platform.pathSeparator}${file.uri.pathSegments.last}';
-      await file.rename(newPath);
-
-      _loadRecycledFiles(); // Refresh after restore
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Restored "${file.uri.pathSegments.last}"'),
-          backgroundColor: Colors.green,
-        ),
-      );
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Failed to restore: $e'),
-          backgroundColor: Colors.red,
-        ),
-      );
-    }
-  }
-
-  @override
-Widget build(BuildContext context) {
-  return Scaffold(
-    appBar: AppBar(
-      title: const Text('Recycle Bin'),
-      actions: [
-        IconButton(
-          icon: const Icon(Icons.folder_open),
-          tooltip: 'Open Recycle Bin Folder',
-          onPressed: () => _openRecycleBinFolder(context),
-        ),
-      ],
-    ),
-    body: _groupedFiles.isEmpty
-        ? const Center(child: Text('Recycle bin is empty.'))
-        : ListView.builder(
-            itemCount: _groupedFiles.length,
-            itemBuilder: (context, index) {
-              final entry = _groupedFiles.entries.elementAt(index);
-              final files = entry.value;
-              final names = files.map((f) => f.uri.pathSegments.last).toList();
-              final prefix = getCommonPrefix(names).trim();
-
-              return Card(
-                margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                elevation: 2,
-                child: ExpansionTile(
-                  title: Text(
-                    prefix.isNotEmpty
-                        ? '$prefix... (${files.length} files)'
-                        : '${names.first} (${files.length} files)',
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  children: files.map((file) {
-                    final name = file.uri.pathSegments.last;
-                    final size = file.lengthSync();
-                    final modified = file.lastModifiedSync();
-
-                    return ListTile(
-                      title: Text(name),
-                      subtitle: Text(
-                        '${(size / 1024).toStringAsFixed(2)} KB • Modified: ${modified.toLocal()}',
-                      ),
-                      onTap: () => OpenFilex.open(file.path),
-                      trailing: IconButton(
-                        icon: const Icon(Icons.restore),
-                        tooltip: 'Restore',
-                        onPressed: () => _restoreFile(context, file),
-                      ),
-                    );
-                  }).toList(),
-                ),
-              );
-            },
-          ),
-  );
-}
-}
-
-
-
 // Main app screens
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -931,7 +692,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     '.gif',
     '.mp4',
     '.mov',
-    '.mkv',
     '.doc',
     '.docx',
     '.pdf',
@@ -941,7 +701,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   ];
   final List<String> _selectedExtensions = [];
   bool _showExtensionFilter = false;
-  final Map<DuplicateGroup, bool> _groupVisibility = {};
 
   @override
   Widget build(BuildContext context) {
@@ -959,20 +718,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
             children: [
               _buildScanButton(context, state),
               const SizedBox(height: 16),
-              ElevatedButton.icon(
-  onPressed: () {
-    Navigator.of(context).push(
-      MaterialPageRoute(builder: (context) => RecycleBinPage()),
-    );
-  },
-  icon: const Icon(Icons.recycling_outlined),
-  label: const Text('Open Recycle Bin'),
-  style: ElevatedButton.styleFrom(
-    backgroundColor: Theme.of(context).colorScheme.primaryContainer,
-    foregroundColor: Theme.of(context).colorScheme.onPrimaryContainer,
-  ),
-),
-
               _buildScanOptions(context, state),
               if (_showExtensionFilter) ...[
                 const SizedBox(height: 16),
@@ -984,8 +729,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
               else if (state.status == ScanStatus.completed &&
                   state.duplicateGroups.isNotEmpty)
                 _buildResultsHeader(context, state),
-                const SizedBox(height: 8),
-                
             ],
           ),
         ),
@@ -1016,25 +759,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       },
     );
   }
-
-
-//_openDupBinFolder is used when open recycle bin button is pressed
-/* Future<void> _openDupBinFolder() async {
-  final docsDir = await getApplicationDocumentsDirectory();
-  final dupBin = Directory('${docsDir.path}${Platform.pathSeparator}dupbin');
-
-  if (!await dupBin.exists()) {
-    await dupBin.create(recursive: true);
-  }
-
-  if (Platform.isWindows) {
-    await Process.run('explorer', [dupBin.path]);
-  } else if (Platform.isMacOS) {
-    await Process.run('open', [dupBin.path]);
-  } else if (Platform.isLinux) {
-    await Process.run('xdg-open', [dupBin.path]);
-  }
-} */
 
   Widget _buildAppBar(BuildContext context, ScanState state) {
     return SliverAppBar(
@@ -1319,170 +1043,62 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
 }
 
 
-// it is the page shows after duplicates found
+
   Widget _buildResultsHeader(BuildContext context, ScanState state) {
-  if (state.duplicateGroups.isEmpty) return const SizedBox.shrink();
+    if (state.duplicateGroups.isEmpty) return const SizedBox.shrink();
 
-  final totalSize = state.duplicateGroups.fold(0, (total, group) {
-  if (group.files.length <= 1) return total;
+    final totalSize = state.duplicateGroups.fold(0, (total, group) {
+      // Count all files except one per group (as one needs to be kept)
+      return total + group.totalSize ~/ group.count * (group.count - 1);
+    });
 
-  final sortedFiles = List.of(group.files);
-  sortedFiles.sort((a, b) {
-    final aModified = File(a.path).lastModifiedSync();
-    final bModified = File(b.path).lastModifiedSync();
-    return aModified.compareTo(bModified);
-  });
-
-  // Keep the oldest, sum the rest
-  final duplicatesSize = sortedFiles.skip(1).fold<int>(0, (sum, file) {
-    return sum + File(file.path).lengthSync();
-  });
-
-  return total + duplicatesSize;
-});
-
-  return Card(
-    color: Theme.of(context).colorScheme.secondaryContainer,
-    child: Padding(
-      padding: const EdgeInsets.all(20.0),
-      child: Column(
-        children: [
-          Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Theme.of(context).colorScheme.secondary.withOpacity(0.2),
-                  borderRadius: BorderRadius.circular(12),
+    return Card(
+      color: Theme.of(context).colorScheme.secondaryContainer,
+      child: Padding(
+        padding: const EdgeInsets.all(20.0),
+        child: Column(
+          children: [
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Theme.of(
+                      context,
+                    ).colorScheme.secondary.withOpacity(0.2),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Icon(
+                    Icons.save_alt,
+                    color: Theme.of(context).colorScheme.secondary,
+                  ),
                 ),
-                child: Icon(
-                  Icons.save_alt,
-                  color: Theme.of(context).colorScheme.secondary,
-                ),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Reclaim Space',
-                      style: Theme.of(context).textTheme.titleLarge,
-                    ),
-                    Text(
-                      'You can save up to ${_formatSize(totalSize)}',
-                      style: TextStyle(
-                        color: Theme.of(context).colorScheme.secondary,
-                        fontWeight: FontWeight.bold,
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Reclaim Space',
+                        style: Theme.of(context).textTheme.titleLarge,
                       ),
-                    ),
-                  ],
+                      Text(
+                        'You can save up to ${_formatSize(totalSize)}',
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.secondary,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-              ElevatedButton.icon(
-                icon: const Icon(Icons.delete),
-                label: const Text("Delete Duplicates"),
-                onPressed: () => _deleteAllDuplicates(context, state), //func in ln 1164
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Theme.of(context).colorScheme.errorContainer,
-                  foregroundColor: Theme.of(context).colorScheme.onErrorContainer,
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    ),
-  );
-}
-
-// deleteAllDuplicates function to be used onPressed
-Future<void> _deleteAllDuplicates(BuildContext context, ScanState state) async {
-  final confirmed = await showDialog<bool>(
-    context: context,
-    builder: (context) => AlertDialog(
-      title: const Text('Delete All Duplicates'),
-      content: const Text('Are you sure you want to delete all duplicate files except the oldest in each group?'),
-      actions: [
-        TextButton(
-          child: const Text('Cancel'),
-          onPressed: () => Navigator.of(context).pop(false),
+              ],
+            ),
+          ],
         ),
-        ElevatedButton(
-          child: const Text('Yes, Delete'),
-          onPressed: () => Navigator.of(context).pop(true),
-        ),
-      ],
-    ),
-  );
-
-  if (confirmed != true) return;
-
-  final dupBin = await _getDupBinDirectory();
-  int totalSize = 0;
-
-  for (final group in state.duplicateGroups) {
-    if (group.files.length <= 1) continue;
-
-    // Create a map of files with their lastModified date
-    final fileDateMap = <FileInfo, DateTime>{};
-    for (final f in group.files) {
-      try {
-        fileDateMap[f] = File(f.path).lastModifiedSync();
-      } catch (e) {
-        // Skip unreadable files
-        continue;
-      }
-    }
-
-    if (fileDateMap.isEmpty) continue;
-
-    // Find the oldest file
-    final oldest = fileDateMap.entries.reduce((a, b) => a.value.isBefore(b.value) ? a : b).key;
-
-    for (final f in group.files) {
-      if (f.path == oldest.path) continue; // Skip the oldest (original)
-
-      final file = File(f.path);
-      if (await file.exists()) {
-        final fileName = file.path.split(Platform.pathSeparator).last;
-        final newPath = '${dupBin.path}${Platform.pathSeparator}$fileName';
-
-        try {
-          totalSize += await file.length();
-          await file.rename(newPath);
-        } catch (e) {
-          totalSize += await file.length();
-          await file.copy(newPath);
-          await file.delete();
-        }
-      }
-    }
-  }
-
-  if (context.mounted) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Duplicates moved to dupbin. Space saved: ${_formatSize(totalSize)}'),
-        backgroundColor: Colors.green,
       ),
     );
-    context.read<ScanBloc>().add(RescanDirectoryEvent());
   }
-}
-
-
-
-Future<Directory> _getDupBinDirectory() async {
-  final docsDir = await getApplicationDocumentsDirectory();
-  final dupBinPath = '${docsDir.path}${Platform.pathSeparator}dupbin';
-  final dupBinDir = Directory(dupBinPath);
-  if (!await dupBinDir.exists()) {
-    await dupBinDir.create(recursive: true);
-  }
-  return dupBinDir;
-}
-
 
   String _formatSize(int bytes) {
     if (bytes < 1024) return '$bytes B';
@@ -1493,195 +1109,65 @@ Future<Directory> _getDupBinDirectory() async {
   }
 
   Widget _buildResultsList(BuildContext context, ScanState state) {
-  for (var group in state.duplicateGroups) {
-    _groupVisibility.putIfAbsent(group, () => true);
+    return SliverList(
+      delegate: SliverChildBuilderDelegate((context, index) {
+        final group = state.duplicateGroups[index];
+        return _buildDuplicateGroupCard(context, group, index);
+      }, childCount: state.duplicateGroups.length),
+    );
   }
 
-  return SliverList(
-    delegate: SliverChildBuilderDelegate(
-      (context, index) {
-        final group = state.duplicateGroups[index];
-        return _buildDuplicateGroupCard(
-          context,
-          group,
-          index,
-          _groupVisibility[group] ?? true,
-          () async {
-            final confirmed = await showDialog<bool>(
-              context: context,
-              builder: (context) => AlertDialog(
-                title: const Text('Delete Duplicates?'),
-                content: const Text('Are you sure you want to move all but the original file to dupbin?'),
-                actions: [
-                  TextButton(
-                    onPressed: () => Navigator.of(context).pop(false),
-                    child: const Text('Cancel'),
-                  ),
-                  TextButton(
-                    onPressed: () => Navigator.of(context).pop(true),
-                    child: const Text('OK'),
-                  ),
-                ],
+  Widget _buildDuplicateGroupCard(
+    BuildContext context,
+    DuplicateGroup group,
+    int index,
+  ) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Card(
+        child: ExpansionTile(
+          title: Row(
+            children: [
+              Text(
+                '${group.count} duplicates',
+                style: const TextStyle(fontWeight: FontWeight.bold),
               ),
-            );
-
-            if (confirmed != true) return;
-
-            setState(() {
-              _groupVisibility[group] = false;
-            });
-
-            await Future.delayed(const Duration(milliseconds: 400));
-
-            await _deleteGroupDuplicates(
-              context,
-              group,
-              () {
-                context.read<ScanBloc>().add(RemoveDuplicateGroupEvent(group));
-              },
-            );
-          },
-        );
-      },
-      childCount: state.duplicateGroups.length,
-    ),
-  );
-}
-
-
-
-//separate group duplicate cards
- Widget _buildDuplicateGroupCard(
-  BuildContext context,
-  DuplicateGroup group,
-  int index,
-  bool isVisible,
-  VoidCallback onDelete,
-) {
-  return AnimatedOpacity(
-    opacity: isVisible ? 1.0 : 0.0,
-    duration: const Duration(milliseconds: 400),
-    curve: Curves.easeOut,
-    child: AnimatedSize(
-      duration: const Duration(milliseconds: 400),
-      curve: Curves.easeOut,
-      child: isVisible
-          ? Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              child: Card(
-                child: ExpansionTile(
-                  title: Row(
-                    children: [
-                      Text(
-                        '${group.count} duplicates',
-                        style: const TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        '(${_formatSize(group.totalSize)})',
-                        style: TextStyle(
-                          color: Theme.of(context).colorScheme.primary.withOpacity(0.7),
-                        ),
-                      ),
-                      const Spacer(),
-                      IconButton(
-                        icon: const Icon(Icons.delete_outline),
-                        tooltip: 'Delete group duplicates',
-                        onPressed: onDelete,
-                      ),
-                    ],
-                  ),
-                  subtitle: Text(
-                    'First found: ${group.files.first.name}',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  leading: Container(
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: Theme.of(context).colorScheme.error.withOpacity(0.1),
-                      shape: BoxShape.circle,
-                    ),
-                    child: Text(
-                      '${index + 1}',
-                      style: TextStyle(
-                        color: Theme.of(context).colorScheme.error,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                  children: group.files
-                      .map((file) => _buildFileListTile(context, file))
-                      .toList(),
+              const SizedBox(width: 8),
+              Text(
+                '(${_formatSize(group.totalSize)})',
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.primary.withOpacity(0.7),
                 ),
               ),
-            )
-          : const SizedBox.shrink(),
-    ),
-  );
-}
-
-
-// function for deleteGroupDuplicates is used onPressed
-Future<void> _deleteGroupDuplicates(
-  BuildContext context,
-  DuplicateGroup group,
-  void Function() onGroupRemoved,
-) async {
-  final dupBin = await _getDupBinDirectory();
-
-  if (group.files.length <= 1) return;
-
-  // Map each file to its last modified date (safely)
-  final fileDateMap = <FileInfo, DateTime>{};
-  for (final f in group.files) {
-    try {
-      final file = File(f.path);
-      if (await file.exists()) {
-        fileDateMap[f] = await file.lastModified();
-      }
-    } catch (e) {
-      continue; // Skip unreadable or missing files
-    }
-  }
-
-  if (fileDateMap.isEmpty) return;
-
-  // Identify the oldest file to keep
-  final oldest = fileDateMap.entries.reduce((a, b) => a.value.isBefore(b.value) ? a : b).key;
-
-  for (final f in group.files) {
-    if (f.path == oldest.path) continue;
-
-    final file = File(f.path);
-    if (await file.exists()) {
-      final fileName = file.path.split(Platform.pathSeparator).last;
-      final newPath = '${dupBin.path}${Platform.pathSeparator}$fileName';
-
-      try {
-        await file.rename(newPath);
-      } catch (e) {
-        // fallback to copy + delete if rename fails
-        await file.copy(newPath);
-        await file.delete();
-      }
-    }
-  }
-
-  // Trigger vanish animation callback
-  onGroupRemoved();
-
-  if (context.mounted) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Group duplicates moved to Documents/dupbin')),
+            ],
+          ),
+          subtitle: Text(
+            'First found: ${group.files.first.name}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+          leading: Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.error.withOpacity(0.1),
+              shape: BoxShape.circle,
+            ),
+            child: Text(
+              '${index + 1}',
+              style: TextStyle(
+                color: Theme.of(context).colorScheme.error,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+          children:
+              group.files
+                  .map((file) => _buildFileListTile(context, file))
+                  .toList(),
+        ),
+      ),
     );
-
-    // Do not rescan here! Just remove from UI:
-    context.read<ScanBloc>().add(RemoveDuplicateGroupEvent(group));
   }
-}
-
-
 
   Widget _buildFileListTile(BuildContext context, FileInfo file) {
     return ListTile(
@@ -1720,8 +1206,6 @@ Future<void> _deleteGroupDuplicates(
     );
   }
 
-
-// page lastly shows when no duplicate is found
   Widget _buildNoDuplicatesFoundMessage(BuildContext context, ScanState state) {
   if (state.status == ScanStatus.completed && state.duplicateGroups.isEmpty) {
     return SliverFillRemaining(

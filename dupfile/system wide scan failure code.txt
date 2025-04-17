@@ -12,6 +12,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:lottie/lottie.dart';
 import 'package:open_filex/open_filex.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 
 void main() {
@@ -154,6 +155,48 @@ class FileCheckerRepository {
       ),
     );
   }
+
+
+// System wide scan in BG
+Future<void> systemWideScan({
+  List<String> extensions = const [],
+  void Function(int current, int total, String filename)? onProgress,
+}) async {
+  final drives = Platform.isWindows
+      ? List.generate(26, (i) => String.fromCharCode(65 + i))
+          .where((letter) => Directory('$letter:\\').existsSync())
+          .map((letter) => Directory('$letter:\\'))
+      : [Directory('/')];
+
+  final allFiles = <File>[];
+
+  for (final drive in drives) {
+    final files = await collectFiles(drive, extensions: extensions);
+    allFiles.addAll(files);
+  }
+
+  int total = allFiles.length;
+  int count = 0;
+
+  for (final file in allFiles) {
+    try {
+      final info = FileInfo.fromFile(file);
+      final checksum = await Isolate.run(() => FileWorker.computeChecksum({'path': file.path}));
+
+      if (!checksum.startsWith("error:")) {
+        await insertFile(checksum, info);
+      }
+
+      count++;
+      if (onProgress != null) {
+        onProgress(count, total, info.name);
+      }
+    } catch (e) {
+      debugPrint('Error during system scan: $e');
+    }
+  }
+}
+
 
   Future<void> clearDatabase() async {
     final db = await database;
@@ -595,6 +638,8 @@ class SplashScreenWrapper extends StatefulWidget {
 class _SplashScreenWrapperState extends State<SplashScreenWrapper>
     with SingleTickerProviderStateMixin {
   late AnimationController _controller;
+  late Future<void> _initFuture;
+  final FileCheckerRepository _repository = FileCheckerRepository();
 
   @override
   void initState() {
@@ -603,6 +648,148 @@ class _SplashScreenWrapperState extends State<SplashScreenWrapper>
       duration: const Duration(milliseconds: 1500),
       vsync: this,
     )..forward();
+
+    _initFuture = _initializeApp();
+  }
+
+  Future<void> _initializeApp() async {
+    await Future.delayed(const Duration(seconds: 2));
+    final prefs = await SharedPreferences.getInstance();
+    final hasScanned = prefs.getBool('hasScannedSystem') ?? false;
+
+    // Start scan in the background without awaiting it
+    if (!hasScanned) {
+      performSystemWideScan().then((_) async {
+        await prefs.setBool('hasScannedSystem', true);
+        debugPrint("System-wide scan finished.");
+      });
+    } else {
+      // Still update the DB with new files in background
+      _scanAndAddNewFiles();
+    }
+  }
+
+  Future<List<Directory>> _getAvailableDrives() async {
+    const driveLetters = ['D', 'E', 'F', 'G', 'H', 'I', 'J'];
+    List<Directory> drives = [];
+    for (var letter in driveLetters) {
+      final dir = Directory('$letter:\\');
+      if (await dir.exists()) {
+        drives.add(dir);
+      }
+    }
+    return drives;
+  }
+
+  Future<void> performSystemWideScan() async {
+    final drives = await _getAvailableDrives();
+    for (var drive in drives) {
+      await _scanDirectoryRecursively(drive);
+    }
+    debugPrint("System-wide scan completed and saved.");
+  }
+
+  Future<void> _scanDirectoryRecursively(Directory dir) async {
+    int scanned = 0;
+    int total = 0;
+
+    try {
+      final files = <File>[];
+
+      await for (var entity in dir.list(recursive: true, followLinks: false)) {
+        if (entity is File &&
+            !entity.path.contains(r'Windows') &&
+            !entity.path.contains(r'Program Files') &&
+            !entity.path.contains(r'ProgramData') &&
+            !entity.path.contains(r'\$Recycle.Bin') &&
+            !entity.path.contains(r'System Volume Information')) {
+          files.add(entity);
+        }
+      }
+
+      total = files.length;
+      debugPrint("Scanning ${dir.path} - Total files: $total");
+
+      for (var file in files) {
+        final path = file.path;
+
+        final exists = await checkFileExistsInDB(path);
+        if (!exists) {
+          final checksum = await computeChecksum(file);
+          await insertFileIntoDB(path, checksum);
+        }
+
+        scanned++;
+        if (scanned % 100 == 0 || scanned == total) {
+          debugPrint("Scanning (${scanned}/$total): ${file.uri.pathSegments.last}");
+        }
+      }
+
+      debugPrint("Finished scanning ${dir.path}. Total scanned: $scanned");
+    } catch (e) {
+      debugPrint('Error scanning directory: ${dir.path} - $e');
+    }
+  }
+
+  Future<void> _scanAndAddNewFiles() async {
+    final drives = await _getAvailableDrives();
+    for (var drive in drives) {
+      await _scanDirectoryRecursively(drive);
+    }
+    debugPrint("New files (if any) added to the database.");
+  }
+
+  Future<bool> _isScanComplete() async {
+    final totalFilesInDrives = await _countAllFilesOutsideCDrive();
+    final dbFileCount = await _getFileCountFromDB();
+    return dbFileCount >= totalFilesInDrives;
+  }
+
+  Future<int> _countAllFilesOutsideCDrive() async {
+    int count = 0;
+    final drives = await _getAvailableDrives();
+    for (var drive in drives) {
+      count += await _countFilesInDirectory(drive);
+    }
+    return count;
+  }
+
+  Future<int> _countFilesInDirectory(Directory dir) async {
+    int count = 0;
+    try {
+      await for (var entity in dir.list(recursive: true, followLinks: false)) {
+        if (entity is File) count++;
+      }
+    } catch (_) {}
+    return count;
+  }
+
+  Future<bool> checkFileExistsInDB(String path) async {
+    final db = await _repository.database;
+    final result = await db.query('files', where: 'path = ?', whereArgs: [path]);
+    return result.isNotEmpty;
+  }
+
+  Future<void> insertFileIntoDB(String path, String checksum) async {
+    final file = File(path);
+    final stat = await file.stat();
+    final fileInfo = FileInfo(
+      path: path,
+      name: file.uri.pathSegments.last,
+      size: stat.size,
+      modified: stat.modified,
+    );
+    await _repository.insertFile(checksum, fileInfo);
+  }
+
+  Future<int> _getFileCountFromDB() async {
+    final db = await _repository.database;
+    final result = await db.rawQuery('SELECT COUNT(*) as count FROM files');
+    return (result.first['count'] as int?) ?? 0;
+  }
+
+  Future<String> computeChecksum(File file) async {
+    return await Isolate.run(() => FileWorker.computeChecksum({'path': file.path}));
   }
 
   @override
@@ -614,22 +801,23 @@ class _SplashScreenWrapperState extends State<SplashScreenWrapper>
   @override
   Widget build(BuildContext context) {
     return FutureBuilder(
-      future: Future.delayed(const Duration(seconds: 2)),
+      future: _initFuture,
       builder: (context, snapshot) {
         return AnimatedSwitcher(
           duration: const Duration(milliseconds: 500),
-          child:
-              snapshot.connectionState == ConnectionState.done
-                  ? const HomeScreen()
-                  : FadeTransition(
-                    opacity: _controller,
-                    child: const SplashScreen(),
-                  ),
+          child: snapshot.connectionState == ConnectionState.done
+              ? const HomeScreen()
+              : FadeTransition(
+                  opacity: _controller,
+                  child: const SplashScreen(),
+                ),
         );
       },
     );
   }
 }
+
+
 
 class SplashScreen extends StatelessWidget {
   const SplashScreen({super.key});
@@ -911,6 +1099,7 @@ Widget build(BuildContext context) {
           ),
   );
 }
+
 }
 
 
