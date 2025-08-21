@@ -93,7 +93,3 @@ This project is licensed under the **MIT License** – free to use, modify, and 
 
 ```
 
----
-
-Do you want me to also include **screenshots/demo section** (with placeholder images) so your README looks more polished on GitHub?
-```
