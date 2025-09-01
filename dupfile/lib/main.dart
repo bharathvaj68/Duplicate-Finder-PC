@@ -11,6 +11,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:lottie/lottie.dart';
+import 'package:intl/intl.dart';
 import 'package:open_filex/open_filex.dart';
 
 
@@ -710,6 +711,212 @@ class SplashScreen extends StatelessWidget {
   }
 }
 
+//Restored Files page
+
+class RestoredFilesScreen extends StatefulWidget {
+  const RestoredFilesScreen({super.key});
+
+  @override
+  State<RestoredFilesScreen> createState() => _RestoredFilesScreenState();
+}
+
+class _RestoredFilesScreenState extends State<RestoredFilesScreen> {
+  Map<String, List<File>> _groupedFiles = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _loadRestoredFiles();
+  }
+
+  /// Calculate checksum for grouping duplicates
+  Future<String> _calculateChecksum(File file) async {
+    try {
+      final bytes = await file.readAsBytes();
+      return sha256.convert(bytes).toString();
+    } catch (_) {
+      return 'error';
+    }
+  }
+
+  /// Load files from restored folder
+  Future<void> _loadRestoredFiles() async {
+    try {
+      final String home = Platform.isWindows
+          ? Platform.environment['USERPROFILE'] ?? ''
+          : Platform.environment['HOME'] ?? '';
+
+      final restoredDir = Directory(
+        join(home, 'Downloads', 'restored_dups'),
+      );
+
+      if (!await restoredDir.exists()) {
+        await restoredDir.create(recursive: true);
+      }
+
+      final files = restoredDir.listSync().whereType<File>().toList();
+      final Map<String, List<File>> grouped = {};
+
+      for (var file in files) {
+        final checksum = await _calculateChecksum(file);
+        if (checksum != 'error') {
+          grouped.putIfAbsent(checksum, () => []).add(file);
+        }
+      }
+
+      setState(() {
+        _groupedFiles = grouped;
+      });
+    } catch (e) {
+      debugPrint('❌ Failed to load restored files: $e');
+    }
+  }
+
+  /// Open restored folder
+  Future<void> _openRestoredFolder(BuildContext context) async {
+    try {
+      final String home = Platform.isWindows
+          ? Platform.environment['USERPROFILE'] ?? ''
+          : Platform.environment['HOME'] ?? '';
+
+      final restoredDirPath = join(home, 'Downloads', 'restored_dups');
+
+      if (!await Directory(restoredDirPath).exists()) {
+        await Directory(restoredDirPath).create(recursive: true);
+      }
+
+      final uri = Uri.file(restoredDirPath);
+      if (!await launchUrl(uri)) {
+        throw 'Could not open folder: $restoredDirPath';
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not open folder: $e')),
+        );
+      }
+    }
+  }
+
+  /// Delete permanently
+  Future<void> _deleteFile(BuildContext context, File file) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (localCtx) => AlertDialog(
+        title: const Text('Delete File'),
+        content: Text('Permanently delete "${basename(file.path)}"?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(localCtx, false), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () => Navigator.pop(localCtx, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    try {
+      await file.delete();
+      await _loadRestoredFiles();
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Deleted "${basename(file.path)}"')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to delete: $e')),
+        );
+      }
+    }
+  }
+
+  /// Get common prefix (for group title)
+  String getCommonPrefix(List<String> names) {
+    if (names.isEmpty) return '';
+    String prefix = names.first;
+    for (final name in names.skip(1)) {
+      while (!name.startsWith(prefix)) {
+        if (prefix.isEmpty) return '';
+        prefix = prefix.substring(0, prefix.length - 1);
+      }
+    }
+    return prefix;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Restored Files'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.folder_open),
+            tooltip: 'Open Restored Folder',
+            onPressed: () => _openRestoredFolder(context),
+          ),
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: _loadRestoredFiles,
+          ),
+        ],
+      ),
+      body: _groupedFiles.isEmpty
+          ? const Center(child: Text('No restored files.'))
+          : ListView.builder(
+              itemCount: _groupedFiles.length,
+              itemBuilder: (context, index) {
+                final entry = _groupedFiles.entries.elementAt(index);
+                final files = entry.value;
+                final names = files.map((f) => basename(f.path)).toList();
+                final prefix = getCommonPrefix(names).trim();
+
+                return Card(
+                  margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  elevation: 2,
+                  child: ExpansionTile(
+                    title: Text(
+                      prefix.isNotEmpty
+                          ? '$prefix... (${files.length} files)'
+                          : '${names.first} (${files.length} files)',
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    children: files.map((file) {
+                      final name = basename(file.path);
+                      final size = file.lengthSync();
+                      final modified = file.lastModifiedSync();
+
+                      return ListTile(
+                        title: Text(name),
+                        subtitle: Text(
+                          '${(size / 1024).toStringAsFixed(2)} KB • Modified: ${DateFormat('MMM dd, yyyy HH:mm').format(modified)}',
+                        ),
+                        onTap: () => OpenFilex.open(file.path),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              icon: const Icon(Icons.delete_forever, color: Colors.red),
+                              tooltip: 'Delete',
+                              onPressed: () => _deleteFile(context, file),
+                            ),
+                          ],
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                );
+              },
+            ),
+    );
+  }
+}
+
 
 //Recycle Bin page
 
@@ -959,20 +1166,45 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
             children: [
               _buildScanButton(context, state),
               const SizedBox(height: 16),
-              ElevatedButton.icon(
-  onPressed: () {
-    Navigator.of(context).push(
-      MaterialPageRoute(builder: (context) => RecycleBinPage()),
-    );
-  },
-  icon: const Icon(Icons.recycling_outlined),
-  label: const Text('Open Recycle Bin'),
-  style: ElevatedButton.styleFrom(
-    backgroundColor: Theme.of(context).colorScheme.primaryContainer,
-    foregroundColor: Theme.of(context).colorScheme.onPrimaryContainer,
-  ),
-),
-
+              Row(
+                        children: [
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              onPressed: () {
+                                Navigator.of(context).push(
+                                  MaterialPageRoute(
+                                    builder: (context) => RecycleBinPage(),
+                                  ),
+                                );
+                              },
+                              icon: const Icon(Icons.recycling_outlined),
+                              label: const Text('Recycle Bin'),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Theme.of(context).colorScheme.primaryContainer,
+                                foregroundColor: Theme.of(context).colorScheme.onPrimaryContainer,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              onPressed: () {
+                                Navigator.of(context).push(
+                                  MaterialPageRoute(
+                                    builder: (context) => RestoredFilesScreen(),
+                                  ),
+                                );
+                              },
+                              icon: const Icon(Icons.restore_from_trash),
+                              label: const Text('Restored Files'),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Theme.of(context).colorScheme.tertiary,
+                                foregroundColor: Theme.of(context).colorScheme.onTertiary,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
               _buildScanOptions(context, state),
               if (_showExtensionFilter) ...[
                 const SizedBox(height: 16),
